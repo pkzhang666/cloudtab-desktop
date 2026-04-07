@@ -2,6 +2,10 @@
   "name": "cloudtab",
   "version": "0.1.0",
   "description": "One-command secure remote Chrome browser on GCP",
+  "author": {
+    "name": "pkzhang666",
+    "email": "pkzhang666@users.noreply.github.com"
+  },
   "main": "out/main/index.js",
   "scripts": {
     "dev": "env -u ELECTRON_RUN_AS_NODE ELECTRON_EXTRA_LAUNCH_ARGS='--no-sandbox --disable-setuid-sandbox --disable-gpu-sandbox' electron-vite dev",
