@@ -191,13 +191,46 @@ async function getPrerequisiteStatus(): Promise<Record<string, boolean>> {
   }
   if (isWindows) results['wsl'] = commandExists('wsl')
 
-  try { await gcloud(['auth', 'print-access-token']); results['gcloud-auth'] = true }
-  catch { results['gcloud-auth'] = false }
+  results['gcloud-auth'] = await hasActiveGcloudLogin()
 
-  try { await gcloud(['auth', 'application-default', 'print-access-token']); results['adc'] = true }
-  catch { results['adc'] = false }
+  results['adc'] = await hasApplicationDefaultCredentials()
 
   return results
+}
+
+async function hasActiveGcloudLogin(): Promise<boolean> {
+  try {
+    const activeAccount = await gcloud([
+      'auth',
+      'list',
+      '--filter=status:ACTIVE',
+      '--format=value(account)',
+    ])
+    return activeAccount.trim().length > 0
+  } catch {
+    return false
+  }
+}
+
+function getAdcCredentialPath(): string {
+  if (isWindows) {
+    const appData = process.env.APPDATA || join(process.env.USERPROFILE || '', 'AppData', 'Roaming')
+    return join(appData, 'gcloud', 'application_default_credentials.json')
+  }
+  if (isMac) {
+    return join(process.env.HOME || '', '.config', 'gcloud', 'application_default_credentials.json')
+  }
+  return join(process.env.HOME || '', '.config', 'gcloud', 'application_default_credentials.json')
+}
+
+async function hasApplicationDefaultCredentials(): Promise<boolean> {
+  if (existsSync(getAdcCredentialPath())) return true
+  try {
+    await gcloud(['auth', 'application-default', 'print-access-token'])
+    return true
+  } catch {
+    return false
+  }
 }
 
 function quotePowerShell(value: string): string {
