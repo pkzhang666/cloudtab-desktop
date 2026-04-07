@@ -81,7 +81,15 @@ function toWslPath(winPath: string): string {
 function commandExists(cmd: string): boolean {
   try {
     if (isWindows) {
-      const result = require('child_process').spawnSync('where', [cmd], { stdio: 'pipe' })
+      // Ask PowerShell to resolve the command using the *current* system PATH
+      // (the Electron process inherits a stale PATH from launch time; newly installed
+      //  tools only appear after reading from the registry)
+      const result = require('child_process').spawnSync(
+        'powershell.exe',
+        ['-NoProfile', '-Command',
+         `$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User'); Get-Command '${cmd.replace(/'/g, "''")}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source`],
+        { stdio: 'pipe' },
+      )
       return result.status === 0
     } else {
       const result = require('child_process').spawnSync('which', [cmd], { stdio: 'pipe' })
@@ -90,13 +98,28 @@ function commandExists(cmd: string): boolean {
   } catch { return false }
 }
 
+// Read the current merged PATH from the Windows registry so newly installed tools
+// are visible even though the Electron process was started before they were installed.
+function freshWindowsEnv(): NodeJS.ProcessEnv {
+  const ps = require('child_process').spawnSync(
+    'powershell.exe',
+    ['-NoProfile', '-Command',
+     "[System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User')"],
+    { encoding: 'utf8', stdio: 'pipe' },
+  )
+  const freshPath: string = ps.stdout?.trim() || process.env.PATH || ''
+  return { ...process.env, PATH: freshPath }
+}
+
 // Run a gcloud command safely — args passed as array, never interpolated into a string
 function gcloud(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile('gcloud', args, { encoding: 'utf8' }, (err, stdout, stderr) => {
-      if (err) reject(new Error(stderr || err.message))
-      else resolve(stdout.trim())
-    })
+    const freshEnv = isWindows ? freshWindowsEnv() : undefined
+    execFile('gcloud', args, { encoding: 'utf8', ...(freshEnv && { env: freshEnv }) },
+      (err, stdout: string, stderr: string) => {
+        if (err) reject(new Error(stderr || err.message))
+        else resolve(stdout.trim())
+      })
   })
 }
 
