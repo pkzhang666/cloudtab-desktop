@@ -52,21 +52,12 @@
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
-      "icon": "src/assets/icon.icns",
-      "target": [
-        "dmg",
-        "zip"
-      ]
+      "target": ["dmg", "zip"]
     },
     "linux": {
-      "icon": "src/assets/icon.png",
-      "target": [
-        "AppImage",
-        "deb"
-      ]
+      "target": ["AppImage", "deb"]
     },
     "win": {
-      "icon": "src/assets/icon.ico",
       "target": [
         { "target": "nsis",     "arch": ["x64"] },
         { "target": "portable", "arch": ["x64"] }
