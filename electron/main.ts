@@ -239,7 +239,8 @@ function quotePowerShell(value: string): string {
 
 function runLoggedProcess(command: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(command, args, { env: process.env, windowsHide: false })
+    const env = isWindows ? freshWindowsEnv() : process.env
+    const proc = spawn(command, args, { env, windowsHide: false })
     let out = '', err = ''
     proc.stdout.on('data', (d) => { out += d; mainWindow?.webContents.send('log', d.toString()) })
     proc.stderr.on('data', (d) => { err += d; mainWindow?.webContents.send('log', d.toString()) })
