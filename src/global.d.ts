@@ -3,6 +3,8 @@ export {}
 declare global {
   interface Window {
     api: {
+      platform: string
+
       checkPrerequisites: () => Promise<Record<string, boolean>>
       getConfig:          () => Promise<Record<string, string>>
       saveConfig:         (config: Record<string, string>) => Promise<void>

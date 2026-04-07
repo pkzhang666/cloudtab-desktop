@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 // Expose a typed API to the renderer process via window.api
 contextBridge.exposeInMainWorld('api', {
+  platform: process.platform,
+
   // Prerequisites
   checkPrerequisites: () => ipcRenderer.invoke('check-prerequisites'),
 

@@ -10,6 +10,7 @@ const MACHINE_TYPES = [
 
 export default function Onboarding() {
   const navigate = useNavigate()
+  const isWindows = window.api.platform === 'win32'
   const [step, setStep] = useState(1)
   const [prereqs, setPrereqs] = useState<Record<string, boolean> | null>(null)
   const [checking, setChecking] = useState(false)
@@ -94,7 +95,7 @@ export default function Onboarding() {
                   adc: 'gcloud auth application-default login',
                   terraform: 'Terraform ≥ 1.5',
                   docker: 'Docker',
-                  ...(process.platform === 'win32' ? { wsl: 'WSL 2 (Windows Subsystem for Linux)' } : {}),
+                  ...(isWindows ? { wsl: 'WSL 2 (Windows Subsystem for Linux)' } : {}),
                 }).map(([k, label]) => (
                   <div key={k} className="flex items-center gap-3 bg-gray-900 rounded-lg px-4 py-3">
                     {prereqs[k]
@@ -110,7 +111,7 @@ export default function Onboarding() {
                 {!prereqsOk && (
                   <div className="text-sm text-red-400 pt-1 space-y-1">
                     <p>Install missing tools, then click Re-check.</p>
-                    {process.platform === 'win32' && !prereqs['wsl'] && (
+                    {isWindows && !prereqs['wsl'] && (
                       <p className="text-gray-400">
                         WSL 2: run <code className="bg-gray-800 px-1 rounded">wsl --install</code> in PowerShell as Administrator, then restart.
                       </p>
