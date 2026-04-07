@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "target": "ESNext",
+    "outDir": "dist-electron",
+    "rootDir": ".",
+    "skipLibCheck": true
+  },
+  "include": ["electron/**/*.ts", "electron.vite.config.ts"]
+}

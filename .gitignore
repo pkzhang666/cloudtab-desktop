@@ -1,0 +1,11 @@
+node_modules/
+out/
+dist/
+release/
+core/.env
+core/terraform/.terraform/
+core/terraform/terraform.tfvars
+core/terraform/*.tfstate
+core/terraform/*.tfstate.backup
+*.log
+.DS_Store

@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+@layer components {
+  .input {
+    @apply w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm
+           text-white placeholder-gray-600
+           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent
+           transition-colors;
+  }
+}
+
+* {
+  -webkit-font-smoothing: antialiased;
+}
+
+.overflow-y-auto::-webkit-scrollbar {
+  width: 4px;
+}
+.overflow-y-auto::-webkit-scrollbar-track {
+  background: transparent;
+}
+.overflow-y-auto::-webkit-scrollbar-thumb {
+  background: #374151;
+  border-radius: 2px;
+}
