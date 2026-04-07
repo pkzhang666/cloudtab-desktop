@@ -199,6 +199,16 @@ async function getPrerequisiteStatus(): Promise<Record<string, boolean>> {
 }
 
 async function hasActiveGcloudLogin(): Promise<boolean> {
+  if (!commandExists('gcloud')) return false
+
+  // Most reliable signal for regular gcloud auth login.
+  try {
+    const configuredAccount = await gcloud(['config', 'get-value', 'account', '--quiet'])
+    if (configuredAccount.trim() && configuredAccount.trim() !== '(unset)') return true
+  } catch {
+    // keep checking fallbacks
+  }
+
   try {
     const activeAccount = await gcloud([
       'auth',
@@ -208,23 +218,27 @@ async function hasActiveGcloudLogin(): Promise<boolean> {
     ])
     return activeAccount.trim().length > 0
   } catch {
-    return false
+    // Final fallback for Windows sessions where CLI state exists but account query fails.
+    return existsSync(join(getGcloudConfigDir(), 'credentials.db'))
   }
+}
+
+function getGcloudConfigDir(): string {
+  if (isWindows) {
+    const appData = process.env.APPDATA || join(process.env.USERPROFILE || '', 'AppData', 'Roaming')
+    return join(appData, 'gcloud')
+  }
+  return join(process.env.HOME || '', '.config', 'gcloud')
 }
 
 function getAdcCredentialPath(): string {
-  if (isWindows) {
-    const appData = process.env.APPDATA || join(process.env.USERPROFILE || '', 'AppData', 'Roaming')
-    return join(appData, 'gcloud', 'application_default_credentials.json')
-  }
-  if (isMac) {
-    return join(process.env.HOME || '', '.config', 'gcloud', 'application_default_credentials.json')
-  }
-  return join(process.env.HOME || '', '.config', 'gcloud', 'application_default_credentials.json')
+  return join(getGcloudConfigDir(), 'application_default_credentials.json')
 }
 
 async function hasApplicationDefaultCredentials(): Promise<boolean> {
-  if (existsSync(getAdcCredentialPath())) return true
+  if (!commandExists('gcloud')) return false
+
+  // Prefer real token validation to avoid false positives from stale credential files.
   try {
     await gcloud(['auth', 'application-default', 'print-access-token'])
     return true
