@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('api', {
 
   // Prerequisites
   checkPrerequisites: () => ipcRenderer.invoke('check-prerequisites'),
+  installMissingWindowsPrerequisites: () => ipcRenderer.invoke('install-missing-windows-prerequisites'),
+  runGcloudAuth: (target: 'gcloud-auth' | 'adc') => ipcRenderer.invoke('run-gcloud-auth', target),
 
   // Config
   getConfig:  ()       => ipcRenderer.invoke('get-config'),

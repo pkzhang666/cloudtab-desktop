@@ -3,6 +3,9 @@ import { join } from 'path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { spawn, execFile, ChildProcess } from 'child_process'
 
+type WindowsInstallTarget = 'wsl' | 'gcloud' | 'terraform' | 'docker'
+type GcloudAuthTarget = 'gcloud-auth' | 'adc'
+
 const isWindows = process.platform === 'win32'
 const isMac     = process.platform === 'darwin'
 
@@ -158,9 +161,7 @@ function requireConfig(env: Record<string, string>, keys: string[]): void {
   if (missing.length) throw new Error(`Missing config: ${missing.join(', ')}. Please complete setup first.`)
 }
 
-// ── IPC Handlers ───────────────────────────────────────────────────────────
-
-ipcMain.handle('check-prerequisites', async () => {
+async function getPrerequisiteStatus(): Promise<Record<string, boolean>> {
   const results: Record<string, boolean> = {}
   for (const tool of ['gcloud', 'terraform', 'docker']) {
     results[tool] = commandExists(tool)
@@ -174,6 +175,110 @@ ipcMain.handle('check-prerequisites', async () => {
   catch { results['adc'] = false }
 
   return results
+}
+
+function quotePowerShell(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
+
+function runLoggedProcess(command: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(command, args, { env: process.env, windowsHide: false })
+    let out = '', err = ''
+    proc.stdout.on('data', (d) => { out += d; mainWindow?.webContents.send('log', d.toString()) })
+    proc.stderr.on('data', (d) => { err += d; mainWindow?.webContents.send('log', d.toString()) })
+    proc.on('close', (code) => code === 0 ? resolve(out.trim()) : reject(new Error(err || `${command} exited with code ${code}`)))
+    proc.on('error', reject)
+  })
+}
+
+function runElevatedWindowsProcess(command: string, args: string[]): Promise<void> {
+  if (!isWindows) throw new Error('Windows installer flow is only available on Windows.')
+
+  const argList = args.map(quotePowerShell).join(', ')
+  const script = `$p = Start-Process -FilePath ${quotePowerShell(command)} -Verb RunAs -Wait -PassThru -ArgumentList @(${argList}); exit $p.ExitCode`
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+      env: process.env,
+      windowsHide: false,
+    })
+    let err = ''
+    proc.stdout.on('data', (d) => mainWindow?.webContents.send('log', d.toString()))
+    proc.stderr.on('data', (d) => {
+      err += d
+      mainWindow?.webContents.send('log', d.toString())
+    })
+    proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(err || `Installation exited with code ${code}`)))
+    proc.on('error', reject)
+  })
+}
+
+async function installWindowsPrerequisite(target: WindowsInstallTarget): Promise<{ restartRequired: boolean }> {
+  if (!commandExists('winget') && target !== 'wsl') {
+    throw new Error('winget is required for automatic installs. Install App Installer from Microsoft Store first.')
+  }
+
+  switch (target) {
+    case 'wsl':
+      mainWindow?.webContents.send('log', 'Installing WSL 2...\n')
+      await runElevatedWindowsProcess('wsl', ['--install'])
+      return { restartRequired: true }
+    case 'gcloud':
+      mainWindow?.webContents.send('log', 'Installing Google Cloud SDK with winget...\n')
+      await runElevatedWindowsProcess('winget', ['install', '--id', 'Google.CloudSDK', '-e', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'])
+      return { restartRequired: false }
+    case 'terraform':
+      mainWindow?.webContents.send('log', 'Installing Terraform with winget...\n')
+      await runElevatedWindowsProcess('winget', ['install', '--id', 'Hashicorp.Terraform', '-e', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'])
+      return { restartRequired: false }
+    case 'docker':
+      mainWindow?.webContents.send('log', 'Installing Docker Desktop with winget...\n')
+      await runElevatedWindowsProcess('winget', ['install', '--id', 'Docker.DockerDesktop', '-e', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'])
+      return { restartRequired: false }
+  }
+}
+
+async function installMissingWindowsPrerequisites(): Promise<{ installed: WindowsInstallTarget[]; restartRequired: boolean }> {
+  const current = await getPrerequisiteStatus()
+  const installOrder: WindowsInstallTarget[] = ['wsl', 'gcloud', 'terraform', 'docker']
+  const installed: WindowsInstallTarget[] = []
+  let restartRequired = false
+
+  for (const target of installOrder) {
+    if (!current[target]) {
+      const result = await installWindowsPrerequisite(target)
+      installed.push(target)
+      restartRequired = restartRequired || result.restartRequired
+    }
+  }
+
+  return { installed, restartRequired }
+}
+
+async function runGcloudAuth(target: GcloudAuthTarget): Promise<void> {
+  if (!commandExists('gcloud')) {
+    throw new Error('gcloud is not installed yet.')
+  }
+
+  const args = target === 'adc'
+    ? ['auth', 'application-default', 'login']
+    : ['auth', 'login']
+
+  mainWindow?.webContents.send('log', `Running gcloud ${args.join(' ')}...\n`)
+  await runLoggedProcess('gcloud', args)
+}
+
+// ── IPC Handlers ───────────────────────────────────────────────────────────
+
+ipcMain.handle('check-prerequisites', async () => getPrerequisiteStatus())
+
+ipcMain.handle('install-missing-windows-prerequisites', async () => {
+  return await installMissingWindowsPrerequisites()
+})
+
+ipcMain.handle('run-gcloud-auth', async (_e, target: GcloudAuthTarget) => {
+  await runGcloudAuth(target)
 })
 
 ipcMain.handle('get-config', () => readEnv())

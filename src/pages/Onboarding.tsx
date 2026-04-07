@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ChevronRight, AlertCircle, CheckCircle2 } from 'lucide-react'
+import { ChevronRight, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react'
 
 const MACHINE_TYPES = [
   { value: 'e2-medium',     label: 'e2-medium',     spec: '1 vCPU / 4 GB',  cost: '~$9/mo',  note: 'Light use' },
@@ -14,8 +14,12 @@ export default function Onboarding() {
   const [step, setStep] = useState(1)
   const [prereqs, setPrereqs] = useState<Record<string, boolean> | null>(null)
   const [checking, setChecking] = useState(false)
+  const [installing, setInstalling] = useState(false)
+  const [authenticating, setAuthenticating] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [prereqError, setPrereqError] = useState('')
+  const [prereqMessage, setPrereqMessage] = useState('')
 
   const [config, setConfig] = useState({
     PROJECT_ID:   '',
@@ -36,12 +40,60 @@ export default function Onboarding() {
   // Step 1 — check prerequisites
   async function checkPrereqs() {
     setChecking(true)
-    const r = await window.api.checkPrerequisites()
-    setPrereqs(r)
-    setChecking(false)
+    setPrereqError('')
+    try {
+      const r = await window.api.checkPrerequisites()
+      setPrereqs(r)
+    } catch (e: any) {
+      setPrereqError(e?.message ?? 'Failed to check prerequisites.')
+    } finally {
+      setChecking(false)
+    }
   }
 
   const prereqsOk = prereqs && Object.values(prereqs).every(Boolean)
+  const missingWindowsInstalls = prereqs
+    ? (['wsl', 'gcloud', 'terraform', 'docker'] as const).filter((key) => isWindows && !prereqs[key])
+    : []
+
+  async function handleInstallMissingWindowsPrereqs() {
+    setInstalling(true)
+    setPrereqError('')
+    setPrereqMessage('')
+    try {
+      const result = await window.api.installMissingWindowsPrerequisites()
+      if (result.installed.length === 0) {
+        setPrereqMessage('Nothing to install. Everything already looks present.')
+      } else {
+        const label = result.installed.join(', ')
+        setPrereqMessage(
+          result.restartRequired
+            ? `Installed or started: ${label}. Restart Windows if prompted, then re-check.`
+            : `Installed or started: ${label}. Re-check after the installers finish.`
+        )
+      }
+      await checkPrereqs()
+    } catch (e: any) {
+      setPrereqError(e?.message ?? 'Automatic installation failed.')
+    } finally {
+      setInstalling(false)
+    }
+  }
+
+  async function handleGcloudAuth(target: 'gcloud-auth' | 'adc') {
+    setAuthenticating(target)
+    setPrereqError('')
+    setPrereqMessage('')
+    try {
+      await window.api.runGcloudAuth(target)
+      setPrereqMessage(target === 'adc' ? 'Application default credentials configured.' : 'gcloud login completed.')
+      await checkPrereqs()
+    } catch (e: any) {
+      setPrereqError(e?.message ?? 'Authentication failed.')
+    } finally {
+      setAuthenticating('')
+    }
+  }
 
   // Step 3 — save config + run setup
   async function handleSave() {
@@ -113,10 +165,47 @@ export default function Onboarding() {
                     <p>Install missing tools, then click Re-check.</p>
                     {isWindows && !prereqs['wsl'] && (
                       <p className="text-gray-400">
-                        WSL 2: run <code className="bg-gray-800 px-1 rounded">wsl --install</code> in PowerShell as Administrator, then restart.
+                        CloudTab can launch the Windows installers for you. WSL may still require a restart.
                       </p>
                     )}
                   </div>
+                )}
+
+                {prereqError && (
+                  <p className="text-sm text-red-400 flex items-center gap-1">
+                    <AlertCircle size={14} /> {prereqError}
+                  </p>
+                )}
+
+                {prereqMessage && (
+                  <p className="text-sm text-gray-300">{prereqMessage}</p>
+                )}
+
+                {isWindows && missingWindowsInstalls.length > 0 && (
+                  <button onClick={handleInstallMissingWindowsPrereqs} disabled={installing || checking}
+                    className="w-full py-2.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
+                    {installing
+                      ? <><Loader2 size={16} className="animate-spin" />Installing prerequisites…</>
+                      : <>Install missing on Windows</>}
+                  </button>
+                )}
+
+                {prereqs['gcloud'] && !prereqs['gcloud-auth'] && (
+                  <button onClick={() => handleGcloudAuth('gcloud-auth')} disabled={!!authenticating || checking}
+                    className="w-full py-2.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
+                    {authenticating === 'gcloud-auth'
+                      ? <><Loader2 size={16} className="animate-spin" />Opening gcloud login…</>
+                      : <>Sign in to gcloud</>}
+                  </button>
+                )}
+
+                {prereqs['gcloud'] && prereqs['gcloud-auth'] && !prereqs['adc'] && (
+                  <button onClick={() => handleGcloudAuth('adc')} disabled={!!authenticating || checking}
+                    className="w-full py-2.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
+                    {authenticating === 'adc'
+                      ? <><Loader2 size={16} className="animate-spin" />Configuring ADC…</>
+                      : <>Set up application default credentials</>}
+                  </button>
                 )}
 
                 <div className="flex gap-2 pt-2">

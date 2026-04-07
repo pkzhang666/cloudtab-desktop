@@ -6,6 +6,11 @@ declare global {
       platform: string
 
       checkPrerequisites: () => Promise<Record<string, boolean>>
+      installMissingWindowsPrerequisites: () => Promise<{
+        installed: Array<'wsl' | 'gcloud' | 'terraform' | 'docker'>
+        restartRequired: boolean
+      }>
+      runGcloudAuth: (target: 'gcloud-auth' | 'adc') => Promise<void>
       getConfig:          () => Promise<Record<string, string>>
       saveConfig:         (config: Record<string, string>) => Promise<void>
 

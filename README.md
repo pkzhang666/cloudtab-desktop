@@ -75,7 +75,7 @@ Go to [Releases](https://github.com/pkzhang666/cloudtab-desktop/releases) and do
 
 CloudTab walks you through a 3-step setup wizard:
 
-1. **Prerequisites** — checks that gcloud, Terraform, and Docker are installed and authenticated
+1. **Prerequisites** — checks that gcloud, Terraform, and Docker are installed and authenticated. On Windows, CloudTab can launch the missing installers and the gcloud auth steps for you.
 2. **GCP Config** — enter your project ID, region, machine type
 3. **Security** — set a VNC password (min 8 characters) and screen resolution
 
