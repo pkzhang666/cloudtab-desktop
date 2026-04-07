@@ -33,9 +33,8 @@ function createWindow() {
     height: 640,
     minWidth: 800,
     minHeight: 560,
-    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
-    ...(isWindows && {
-      titleBarOverlay: { color: '#0a0a0f', symbolColor: '#9ca3af', height: 32 },
+    ...(isMac && {
+      titleBarStyle: 'hiddenInset',
     }),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
