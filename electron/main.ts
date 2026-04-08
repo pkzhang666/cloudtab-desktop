@@ -111,11 +111,23 @@ function freshWindowsEnv(): NodeJS.ProcessEnv {
   return { ...process.env, PATH: freshPath }
 }
 
+function resolveWindowsCommandPath(cmd: string): string | null {
+  const ps = require('child_process').spawnSync(
+    'powershell.exe',
+    ['-NoProfile', '-Command',
+     `$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User'); (Get-Command '${cmd.replace(/'/g, "''")}' -ErrorAction SilentlyContinue).Source`],
+    { encoding: 'utf8', stdio: 'pipe' },
+  )
+  const resolved = (ps.stdout || '').trim()
+  return resolved || null
+}
+
 // Run a gcloud command safely — args passed as array, never interpolated into a string
 function gcloud(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const freshEnv = isWindows ? freshWindowsEnv() : undefined
-    execFile('gcloud', args, { encoding: 'utf8', ...(freshEnv && { env: freshEnv }) },
+    const gcloudBin = isWindows ? (resolveWindowsCommandPath('gcloud') || 'gcloud') : 'gcloud'
+    execFile(gcloudBin, args, { encoding: 'utf8', ...(freshEnv && { env: freshEnv }) },
       (err, stdout: string, stderr: string) => {
         if (err) reject(new Error(stderr || err.message))
         else resolve(stdout.trim())
@@ -254,7 +266,8 @@ function quotePowerShell(value: string): string {
 function runLoggedProcess(command: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const env = isWindows ? freshWindowsEnv() : process.env
-    const proc = spawn(command, args, { env, windowsHide: false })
+    const executable = isWindows ? (resolveWindowsCommandPath(command) || command) : command
+    const proc = spawn(executable, args, { env, windowsHide: false })
     let out = '', err = ''
     proc.stdout.on('data', (d) => { out += d; mainWindow?.webContents.send('log', d.toString()) })
     proc.stderr.on('data', (d) => { err += d; mainWindow?.webContents.send('log', d.toString()) })
@@ -394,14 +407,16 @@ ipcMain.handle('open-tunnel', async () => {
   requireConfig(env, ['VM_NAME', 'ZONE', 'PROJECT_ID'])
 
   return new Promise<{ ok: boolean; port: number }>((resolve, reject) => {
-    const proc = spawn('gcloud', [
+    const envForTunnel = isWindows ? freshWindowsEnv() : process.env
+    const gcloudBin = isWindows ? (resolveWindowsCommandPath('gcloud') || 'gcloud') : 'gcloud'
+    const proc = spawn(gcloudBin, [
       'compute', 'ssh', env.VM_NAME,
       `--zone=${env.ZONE}`, `--project=${env.PROJECT_ID}`,
       '--tunnel-through-iap',
       '--', '-L', '8080:localhost:8080', '-N',
       '-o', 'ExitOnForwardFailure=yes',
       '-o', 'ServerAliveInterval=30',
-    ])
+    ], { env: envForTunnel, windowsHide: false })
 
     proc.on('error', (err) => reject(err))
 
