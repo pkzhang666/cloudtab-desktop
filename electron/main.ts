@@ -173,13 +173,20 @@ function runScript(script: string, args: string[] = []): Promise<string> {
     : ['bash', [scriptPath, ...args]]
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, cmdArgs, {
-      env: { ...process.env, CORE_DIR: isWindows ? toWslPath(CORE_DIR) : CORE_DIR },
-    })
+    const env = isWindows ? getWslEnv() : process.env
+    const proc = spawn(cmd, cmdArgs, { env })
     let out = '', err = ''
     proc.stdout.on('data', (d) => { out += d; mainWindow?.webContents.send('log', d.toString()) })
     proc.stderr.on('data', (d) => { err += d; mainWindow?.webContents.send('log', d.toString()) })
-    proc.on('close', (code) => code === 0 ? resolve(out) : reject(new Error(err || `Script exited with code ${code}`)))
+    proc.on('close', (code) => {
+      if (code === 0) {
+        resolve(out)
+      } else if (err.includes('command not found')) {
+        reject(new Error(`${err}\n\nInstall missing tools in Ubuntu: sudo apt update && sudo apt install -y build-essential`))
+      } else {
+        reject(new Error(err || `Script exited with code ${code}`))
+      }
+    })
     proc.on('error', reject)
   })
 }
@@ -198,11 +205,20 @@ function runMake(target: string): Promise<string> {
     : ['make', ['-C', makefileDir, target]]
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, cmdArgs, { env: process.env })
+    const env = isWindows ? getWslEnv() : process.env
+    const proc = spawn(cmd, cmdArgs, { env })
     let out = '', err = ''
     proc.stdout.on('data', (d) => { out += d; mainWindow?.webContents.send('log', d.toString()) })
     proc.stderr.on('data', (d) => { err += d; mainWindow?.webContents.send('log', d.toString()) })
-    proc.on('close', (code) => code === 0 ? resolve(out) : reject(new Error(err || `make ${target} exited with code ${code}`)))
+    proc.on('close', (code) => {
+      if (code === 0) {
+        resolve(out)
+      } else if (err.includes('make: command not found')) {
+        reject(new Error(`make not found in Ubuntu.\n\nRun this in Ubuntu to install it:\n  sudo apt update && sudo apt install -y build-essential`))
+      } else {
+        reject(new Error(err || `make ${target} exited with code ${code}`))
+      }
+    })
     proc.on('error', reject)
   })
 }
@@ -300,6 +316,16 @@ async function hasApplicationDefaultCredentials(): Promise<boolean> {
     return true
   } catch {
     return false
+  }
+}
+
+// Get a clean environment for WSL to avoid Windows PATH translation issues.
+// Use minimal vars to avoid "Failed to translate" warnings on paths with spaces.
+function getWslEnv(): NodeJS.ProcessEnv {
+  return {
+    WSLENV: '',  // Don't translate Windows env vars to WSL
+    CORE_DIR: toWslPath(CORE_DIR),
+    HOME: '/root',  // WSL default home
   }
 }
 
