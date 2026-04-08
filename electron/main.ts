@@ -289,7 +289,7 @@ function getWindowsProxyEnv(): Record<string, string> {
 
 // Run terraform on Windows — avoids WSL network issues (WSL in NAT mode cannot reach
 // Google APIs directly; Windows has proxy access). Streams output via sendLog().
-function runWindowsTerraform(args: string[]): Promise<string> {
+function runWindowsTerraform(args: string[], options?: { timeoutMs?: number }): Promise<string> {
   const terraformDir = join(CORE_DIR, 'terraform')
   const freshEnv = freshWindowsEnv()
   const adcPath = join(getGcloudConfigDir(), 'application_default_credentials.json')
@@ -313,15 +313,43 @@ function runWindowsTerraform(args: string[]): Promise<string> {
   } catch { /* fallback to GOOGLE_APPLICATION_CREDENTIALS */ }
   // terraform.exe is on PATH (validated at startup via prerequisites check)
   return new Promise((resolve, reject) => {
+    const timeoutMs = options?.timeoutMs ?? (args[0] === 'init' ? 3 * 60_000 : 0)
     const proc = spawn('terraform', args, { cwd: terraformDir, env })
     let out = '', err = ''
+    let settled = false
+
+    const finishOk = (value: string) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve(value)
+    }
+
+    const finishErr = (error: Error) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      reject(error)
+    }
+
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+        sendLog(`\n==> Terraform ${args[0]} timed out after ${Math.floor(timeoutMs / 60_000)} minutes. Stopping process...\n`)
+        proc.kill()
+        finishErr(new Error(
+          `terraform ${args[0]} timed out after ${Math.floor(timeoutMs / 60_000)} minutes. ` +
+          `Please retry Deploy. If it repeats, check proxy/network and ensure no other deploy is running.`
+        ))
+      }, timeoutMs)
+      : null
+
     proc.stdout.on('data', (d) => { out += d; sendLog(d.toString()) })
     proc.stderr.on('data', (d) => { err += d; sendLog(d.toString()) })
     proc.on('close', (code) => {
-      if (code === 0) resolve(out)
-      else reject(new Error(err || `terraform ${args[0]} exited with code ${code}`))
+      if (code === 0) finishOk(out)
+      else finishErr(new Error(err || `terraform ${args[0]} exited with code ${code}`))
     })
-    proc.on('error', reject)
+    proc.on('error', (e) => finishErr(e instanceof Error ? e : new Error(String(e))))
   })
 }
 
