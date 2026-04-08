@@ -2,6 +2,8 @@ import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import { join } from 'path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { spawn, execFile, ChildProcess } from 'child_process'
+import { createServer } from 'http'
+import { createServer as createNetServer } from 'net'
 
 type WindowsInstallTarget = 'wsl' | 'gcloud'
 type GcloudAuthTarget = 'gcloud-auth' | 'adc'
@@ -20,6 +22,11 @@ app.commandLine.appendSwitch('disable-gpu')
 
 // ── Paths ──────────────────────────────────────────────────────────────────
 const isDev = !app.isPackaged
+
+// Enable remote debugging in dev so playwright/CDP can drive UI tests
+if (isDev) {
+  app.commandLine.appendSwitch('remote-debugging-port', '9222')
+}
 const CORE_DIR = isDev
   ? join(app.getAppPath(), 'core')
   : join(process.resourcesPath, 'core')
@@ -28,6 +35,14 @@ const ENV_FILE   = join(CONFIG_DIR, '.env')
 
 let mainWindow: BrowserWindow | null = null
 let tunnelProcess: ChildProcess | null = null
+let activeTunnelPort: number | null = null
+
+// ── Dev bridge (SSE log streaming to plain browser) ─────────────────────────
+const sseClients: Array<(line: string) => void> = []
+function sendLog(msg: string): void {
+  mainWindow?.webContents.send('log', msg)
+  for (const c of sseClients) c(msg)
+}
 
 // ── Window ─────────────────────────────────────────────────────────────────
 function createWindow() {
@@ -58,13 +73,14 @@ function createWindow() {
 app.whenReady().then(() => {
   mkdirSync(CONFIG_DIR, { recursive: true })
   createWindow()
+  if (isDev) startDevBridgeServer()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
 
 app.on('window-all-closed', () => {
-  tunnelProcess?.kill()
+  closeTunnelProcess()
   if (!isMac) app.quit()
 })
 
@@ -200,8 +216,8 @@ function runScript(script: string, args: string[] = []): Promise<string> {
     const env = isWindows ? freshWindowsEnv() : process.env
     const proc = spawn(cmd, cmdArgs, { env })
     let out = '', err = ''
-    proc.stdout.on('data', (d) => { out += d; mainWindow?.webContents.send('log', d.toString()) })
-    proc.stderr.on('data', (d) => { err += d; mainWindow?.webContents.send('log', d.toString()) })
+    proc.stdout.on('data', (d) => { out += d; sendLog(d.toString()) })
+    proc.stderr.on('data', (d) => { err += d; sendLog(d.toString()) })
     proc.on('close', (code) => {
       if (code === 0) {
         resolve(out)
@@ -232,8 +248,8 @@ function runMake(target: string): Promise<string> {
     const env = isWindows ? freshWindowsEnv() : process.env
     const proc = spawn(cmd, cmdArgs, { env })
     let out = '', err = ''
-    proc.stdout.on('data', (d) => { out += d; mainWindow?.webContents.send('log', d.toString()) })
-    proc.stderr.on('data', (d) => { err += d; mainWindow?.webContents.send('log', d.toString()) })
+    proc.stdout.on('data', (d) => { out += d; sendLog(d.toString()) })
+    proc.stderr.on('data', (d) => { err += d; sendLog(d.toString()) })
     proc.on('close', (code) => {
       if (code === 0) {
         resolve(out)
@@ -245,6 +261,133 @@ function runMake(target: string): Promise<string> {
     })
     proc.on('error', reject)
   })
+}
+
+// Read the Windows system proxy from the registry. Go binaries (like terraform.exe)
+// do NOT automatically use the Windows proxy registry — they only honour HTTPS_PROXY/HTTP_PROXY
+// environment variables. We read the registry and inject those vars so Terraform can
+// reach Google APIs through the local HTTP proxy (e.g. Clash/v2ray at 127.0.0.1:10809).
+function getWindowsProxyEnv(): Record<string, string> {
+  try {
+    const psExe = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    const result = require('child_process').spawnSync(
+      psExe,
+      ['-NoProfile', '-Command',
+       '$k="HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";' +
+       '$e=Get-ItemProperty $k -EA SilentlyContinue;' +
+       'if($e.ProxyEnable -eq 1 -and $e.ProxyServer){Write-Output $e.ProxyServer}'],
+      { encoding: 'utf8', stdio: 'pipe', timeout: 5_000 },
+    )
+    const server = (result.stdout as string)?.trim()
+    if (server) {
+      const proxyUrl = server.startsWith('http') ? server : `http://${server}`
+      return { HTTPS_PROXY: proxyUrl, HTTP_PROXY: proxyUrl, NO_PROXY: 'localhost,127.0.0.1,::1' }
+    }
+  } catch { /* ignore */ }
+  return {}
+}
+
+// Run terraform on Windows — avoids WSL network issues (WSL in NAT mode cannot reach
+// Google APIs directly; Windows has proxy access). Streams output via sendLog().
+function runWindowsTerraform(args: string[]): Promise<string> {
+  const terraformDir = join(CORE_DIR, 'terraform')
+  const freshEnv = freshWindowsEnv()
+  const adcPath = join(getGcloudConfigDir(), 'application_default_credentials.json')
+  const env: NodeJS.ProcessEnv = {
+    ...freshEnv,
+    ...getWindowsProxyEnv(),
+    GOOGLE_APPLICATION_CREDENTIALS: adcPath,
+  }
+  // Pre-fetch a fresh ADC access token so Terraform never needs to call
+  // oauth2.googleapis.com.
+  try {
+    const cmdExe = process.env.ComSpec ?? join(winSys32(), 'cmd.exe')
+    const result = require('child_process').spawnSync(
+      cmdExe, ['/c', 'gcloud', 'auth', 'application-default', 'print-access-token'],
+      { encoding: 'utf8', stdio: 'pipe', timeout: 30_000, env: freshEnv },
+    )
+    const token = (result.stdout as string)?.trim()
+    if (token && token.startsWith('ya29')) {
+      env.GOOGLE_OAUTH_ACCESS_TOKEN = token
+    }
+  } catch { /* fallback to GOOGLE_APPLICATION_CREDENTIALS */ }
+  // terraform.exe is on PATH (validated at startup via prerequisites check)
+  return new Promise((resolve, reject) => {
+    const proc = spawn('terraform', args, { cwd: terraformDir, env })
+    let out = '', err = ''
+    proc.stdout.on('data', (d) => { out += d; sendLog(d.toString()) })
+    proc.stderr.on('data', (d) => { err += d; sendLog(d.toString()) })
+    proc.on('close', (code) => {
+      if (code === 0) resolve(out)
+      else reject(new Error(err || `terraform ${args[0]} exited with code ${code}`))
+    })
+    proc.on('error', reject)
+  })
+}
+
+// Run the "push" step (vm-setup + scp files + docker compose) natively on Windows.
+// This avoids WSL interop issues where plink.exe running through WSL2 binfmt_misc
+// has corrupted stdin/stdout that causes SSH hangs. Running gcloud.cmd directly
+// from a Windows process uses the Windows SDK's plink with proper I/O.
+async function runWindowsPush(): Promise<void> {
+  const config = readEnv()
+  const vm = config.VM_NAME
+  const zone = config.ZONE
+  const project = config.PROJECT_ID
+  const remoteDir = config.REMOTE_DIR || '/opt/novnc-chrome'
+  if (!vm || !zone || !project) throw new Error('VM_NAME, ZONE, PROJECT_ID must be configured')
+
+  const cmdExe = process.env.ComSpec ?? join(winSys32(), 'cmd.exe')
+  const freshEnv = freshWindowsEnv()
+  const proxyEnv = getWindowsProxyEnv()
+  const adcPath = join(getGcloudConfigDir(), 'application_default_credentials.json')
+  const winEnv: NodeJS.ProcessEnv = { ...freshEnv, ...proxyEnv, GOOGLE_APPLICATION_CREDENTIALS: adcPath }
+  try {
+    const r = require('child_process').spawnSync(
+      cmdExe, ['/c', 'gcloud', 'auth', 'application-default', 'print-access-token'],
+      { encoding: 'utf8', stdio: 'pipe', timeout: 30_000, env: freshEnv },
+    )
+    const t = (r.stdout as string)?.trim()
+    if (t?.startsWith('ya29')) winEnv.GOOGLE_OAUTH_ACCESS_TOKEN = t
+  } catch { /* fallback to ADC file */ }
+
+  const sshFlags = [
+    `--zone=${zone}`, `--project=${project}`, '--tunnel-through-iap',
+    '--strict-host-key-checking=no',
+  ]
+
+  const runGcloudCmd = (args: string[]) => new Promise<void>((res, rej) => {
+    const proc2 = spawn(cmdExe, ['/c', 'gcloud.cmd', ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'], env: winEnv,
+    })
+    proc2.stdout.on('data', (d: Buffer) => sendLog(d.toString()))
+    proc2.stderr.on('data', (d: Buffer) => sendLog(d.toString()))
+    proc2.on('close', (code: number | null) =>
+      code === 0 ? res() : rej(new Error(`gcloud ${args[0]} ${args[1] ?? ''} exited with code ${code}`)))
+    proc2.on('error', rej)
+  })
+
+  sendLog('==> Verifying VM is ready...\n')
+  // Encode vm-setup.sh as base64 and embed in --command to avoid stdin piping
+  // through the cmd.exe→batch chain which consumes/corrupts input bytes.
+  const setupScript: Buffer = require('fs').readFileSync(join(CORE_DIR, 'scripts', 'vm-setup.sh'))
+  const scriptB64 = setupScript.toString('base64')
+  await runGcloudCmd(['compute', 'ssh', vm, ...sshFlags,
+    `--command=echo '${scriptB64}' | base64 -d | bash`])
+
+  sendLog('==> Syncing files to VM...\n')
+  await runGcloudCmd([
+    'compute', 'scp', '--recurse', '--compress',
+    join(CORE_DIR, 'docker-compose.yml'), join(CORE_DIR, 'docker'), join(CORE_DIR, '.env'),
+    `${vm}:${remoteDir}/`,
+    ...sshFlags,
+  ])
+
+  sendLog('==> Starting Docker stack on VM...\n')
+  await runGcloudCmd([
+    'compute', 'ssh', vm, ...sshFlags,
+    `--command=cd ${remoteDir} && sudo docker compose up -d --build`,
+  ])
 }
 
 function readEnv(): Record<string, string> {
@@ -359,10 +502,27 @@ function buildWslLinuxEnv(): string[] {
   ]
   if (isWindows) {
     const gcloudConfigWsl = toWslPath(getGcloudConfigDir())
-    // Let gcloud in WSL share the same credentials as Windows gcloud
-    pairs.push(`CLOUDSDK_CONFIG=${gcloudConfigWsl}`)
+    // Use a WSL-native CLOUDSDK_CONFIG so gcloud in WSL uses OpenSSH (not plink.exe).
+    // Sharing the Windows gcloud config causes Linux gcloud to inherit Windows-specific SSH
+    // settings (plink path etc.) — using a separate dir avoids that.  All gcloud commands in
+    // the Makefile pass --project/--zone explicitly, so no config value is needed.
+    pairs.push('CLOUDSDK_CONFIG=/root/.config/gcloud-cloudtab')
     // Let terraform / other ADC-aware tools find credentials (terraform ignores CLOUDSDK_CONFIG)
     pairs.push(`GOOGLE_APPLICATION_CREDENTIALS=${gcloudConfigWsl}/application_default_credentials.json`)
+    // Fetch a fresh ADC access token from Windows gcloud and inject it directly so that
+    // Terraform in WSL never needs to call oauth2.googleapis.com (WSL has no direct internet
+    // in NAT mode; the Windows proxy at localhost is not reachable from the WSL network).
+    try {
+      const cmdExe = process.env.ComSpec ?? join(winSys32(), 'cmd.exe')
+      const result = require('child_process').spawnSync(
+        cmdExe, ['/c', 'gcloud', 'auth', 'application-default', 'print-access-token'],
+        { encoding: 'utf8', stdio: 'pipe', timeout: 30_000, env: freshWindowsEnv() },
+      )
+      const token = (result.stdout as string)?.trim()
+      if (token && token.startsWith('ya29')) {
+        pairs.push(`GOOGLE_OAUTH_ACCESS_TOKEN=${token}`)
+      }
+    } catch { /* ignore — terraform falls back to GOOGLE_APPLICATION_CREDENTIALS */ }
   }
   return pairs
 }
@@ -384,7 +544,7 @@ async function ensureWslEnvironment(): Promise<boolean> {
   )
   if (quickCheck.status === 0) return true
 
-  mainWindow?.webContents.send('log', 'Installing required tools in Ubuntu (this may take a few minutes)...\n')
+  sendLog('Installing required tools in Ubuntu (this may take a few minutes)...\n')
 
   // Build the install script as a joined string to avoid TypeScript template-literal
   // interpolation of bash variables like ${VAR} or line-continuation escaping issues.
@@ -421,11 +581,11 @@ async function ensureWslEnvironment(): Promise<boolean> {
   )
 
   if (install.status === 0) {
-    mainWindow?.webContents.send('log', 'WSL environment ready.\n')
+    sendLog('WSL environment ready.\n')
     return true
   }
 
-  mainWindow?.webContents.send('log', `WSL tool installation failed:\n${install.stderr}\n`)
+  sendLog(`WSL tool installation failed:\n${install.stderr}\n`)
   return false
 }
 
@@ -443,8 +603,8 @@ function runLoggedProcess(command: string, args: string[]): Promise<string> {
       : [command, args]
     const proc = spawn(cmd, cmdArgs, { env, windowsHide: false, stdio: ['ignore', 'pipe', 'pipe'] })
     let out = '', err = ''
-    proc.stdout!.on('data', (d) => { out += d; mainWindow?.webContents.send('log', d.toString()) })
-    proc.stderr!.on('data', (d) => { err += d; mainWindow?.webContents.send('log', d.toString()) })
+    proc.stdout!.on('data', (d) => { out += d; sendLog(d.toString()) })
+    proc.stderr!.on('data', (d) => { err += d; sendLog(d.toString()) })
     proc.on('close', (code) => code === 0 ? resolve(out.trim()) : reject(new Error(err || `${command} exited with code ${code}`)))
     proc.on('error', reject)
   })
@@ -466,10 +626,10 @@ function runElevatedWindowsProcess(command: string, args: string[]): Promise<voi
       windowsHide: false,
     })
     let err = ''
-    proc.stdout.on('data', (d) => mainWindow?.webContents.send('log', d.toString()))
+    proc.stdout.on('data', (d) => sendLog(d.toString()))
     proc.stderr.on('data', (d) => {
       err += d
-      mainWindow?.webContents.send('log', d.toString())
+      sendLog(d.toString())
     })
     proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(err || `Installation exited with code ${code}`)))
     proc.on('error', reject)
@@ -483,13 +643,13 @@ async function installWindowsPrerequisite(target: WindowsInstallTarget): Promise
 
   switch (target) {
     case 'wsl':
-      mainWindow?.webContents.send('log', 'Installing WSL 2 and Ubuntu 24.04...\n')
+      sendLog('Installing WSL 2 and Ubuntu 24.04...\n')
       // After restart, build-essential will be auto-installed on the next Re-check.
       await runElevatedWindowsProcess('wsl', ['--install', '-d', 'Ubuntu-24.04'])
-      mainWindow?.webContents.send('log', 'WSL installation queued. Restart Windows when prompted.\n')
+      sendLog('WSL installation queued. Restart Windows when prompted.\n')
       return { restartRequired: true }
     case 'gcloud':
-      mainWindow?.webContents.send('log', 'Installing Google Cloud SDK with winget...\n')
+      sendLog('Installing Google Cloud SDK with winget...\n')
       await runElevatedWindowsProcess('winget', ['install', '--id', 'Google.CloudSDK', '-e', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'])
       return { restartRequired: false }
   }
@@ -521,7 +681,7 @@ async function runGcloudAuth(target: GcloudAuthTarget): Promise<void> {
     ? ['auth', 'application-default', 'login']
     : ['auth', 'login']
 
-  mainWindow?.webContents.send('log', `Launching: gcloud ${args.join(' ')}...\n`)
+  sendLog(`Launching: gcloud ${args.join(' ')}...\n`)
 
   // Launch gcloud auth as a detached, independent process so the browser-based
   // OAuth flow doesn't block the IPC call. The IPC returns immediately;
@@ -533,6 +693,225 @@ async function runGcloudAuth(target: GcloudAuthTarget): Promise<void> {
     : ['gcloud', args]
   const child = spawn(cmd, cmdArgs, { env, windowsHide: false, stdio: 'ignore', detached: true })
   child.unref()
+}
+
+function closeTunnelProcess(): void {
+  tunnelProcess?.kill()
+  tunnelProcess = null
+  activeTunnelPort = null
+}
+
+function checkLocalPortFree(port: number): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
+    const tester = createNetServer()
+    tester.once('error', (err: NodeJS.ErrnoException) => {
+      tester.close()
+      if (err.code === 'EADDRINUSE') {
+        resolve(false)
+        return
+      }
+      reject(err)
+    })
+    tester.once('listening', () => {
+      tester.close(() => resolve(true))
+    })
+    tester.listen(port, '127.0.0.1')
+  })
+}
+
+function parseTunnelPort(config: Record<string, string>): number {
+  const raw = (config.LOCAL_TUNNEL_PORT ?? '8080').trim()
+  const n = Number(raw)
+  if (Number.isInteger(n) && n >= 1024 && n <= 65535) return n
+  return 8080
+}
+
+async function resolveTunnelPort(preferredPort: number): Promise<number> {
+  if (await checkLocalPortFree(preferredPort)) return preferredPort
+
+  // Search upward from the preferred port for a nearby free port.
+  for (let p = preferredPort + 1; p <= Math.min(preferredPort + 50, 65535); p++) {
+    if (await checkLocalPortFree(p)) {
+      sendLog(`Local port ${preferredPort} is busy. Using local port ${p} for tunnel.\n`)
+      return p
+    }
+  }
+
+  throw new Error(`Could not find a free local tunnel port near ${preferredPort}. Set LOCAL_TUNNEL_PORT in settings and try again.`)
+}
+
+async function openTunnelProcess(): Promise<{ ok: boolean; port: number }> {
+  if (tunnelProcess) return Promise.resolve({ ok: true, port: activeTunnelPort ?? 8080 })
+
+  const env = readEnv()
+  requireConfig(env, ['VM_NAME', 'ZONE', 'PROJECT_ID'])
+  const preferredPort = parseTunnelPort(env)
+  const localPort = await resolveTunnelPort(preferredPort)
+
+  let envForTunnel: NodeJS.ProcessEnv
+  let tunnelCmd: string
+  let tunnelArgs: string[]
+
+  if (isWindows) {
+    const freshEnv = freshWindowsEnv()
+    const theAdcPath = getAdcCredentialPath()
+    const proxyEnv = getWindowsProxyEnv()
+    const tokenResult = require('child_process').spawnSync(
+      process.env.ComSpec ?? join(winSys32(), 'cmd.exe'),
+      ['/c', 'gcloud.cmd', 'auth', 'print-access-token'],
+      { encoding: 'utf8', env: { ...freshEnv, ...proxyEnv, GOOGLE_APPLICATION_CREDENTIALS: theAdcPath } }
+    )
+    const accessToken = String(tokenResult.stdout ?? '').trim()
+    envForTunnel = {
+      ...freshEnv,
+      ...proxyEnv,
+      GOOGLE_APPLICATION_CREDENTIALS: theAdcPath,
+      ...(accessToken ? { GOOGLE_OAUTH_ACCESS_TOKEN: accessToken } : {}),
+    }
+    const gcloudArgs = [
+      'compute', 'ssh', env.VM_NAME,
+      `--zone=${env.ZONE}`, `--project=${env.PROJECT_ID}`,
+      '--tunnel-through-iap', '--strict-host-key-checking=no',
+      '--', '-L', `${localPort}:localhost:8080`, '-N',
+    ]
+    tunnelCmd = process.env.ComSpec ?? join(winSys32(), 'cmd.exe')
+    tunnelArgs = ['/c', 'gcloud.cmd', ...gcloudArgs]
+  } else {
+    envForTunnel = process.env
+    const gcloudArgs = [
+      'compute', 'ssh', env.VM_NAME,
+      `--zone=${env.ZONE}`, `--project=${env.PROJECT_ID}`,
+      '--tunnel-through-iap',
+      '--', '-L', `${localPort}:localhost:8080`, '-N',
+      '-o', 'ExitOnForwardFailure=yes',
+      '-o', 'ServerAliveInterval=30',
+    ]
+    tunnelCmd = 'gcloud'
+    tunnelArgs = gcloudArgs
+  }
+
+  const proc = spawn(tunnelCmd, tunnelArgs, { env: envForTunnel, windowsHide: false })
+  proc.stdout.on('data', (d) => sendLog(String(d)))
+  proc.stderr.on('data', (d) => sendLog(String(d)))
+
+  return new Promise<{ ok: boolean; port: number }>((resolve, reject) => {
+    proc.on('error', (err) => reject(err))
+
+    // Give the tunnel up to 8s to establish before declaring success.
+    const timer = setTimeout(() => {
+      tunnelProcess = proc
+      activeTunnelPort = localPort
+      proc.on('close', () => { tunnelProcess = null })
+      resolve({ ok: true, port: localPort })
+    }, 8000)
+
+    // If the process exits before the timer fires, the tunnel failed.
+    proc.once('close', (code) => {
+      clearTimeout(timer)
+      reject(new Error(`IAP tunnel exited early (code ${code}). Is the VM running?`))
+    })
+  })
+}
+
+// ── Dev HTTP Bridge ─────────────────────────────────────────────────────────
+// Exposes all IPC handlers over HTTP + SSE so the app can be driven from a
+// plain browser (e.g., for automated UI testing) without Electron preload.
+// Only started in dev mode — never shipped in the production build.
+function startDevBridgeServer(): void {
+  const server = createServer(async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+
+    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
+
+    // SSE: stream log lines to browser
+    if (req.url === '/api/logs') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' })
+      const send = (line: string) => res.write(`data: ${JSON.stringify(line)}\n\n`)
+      sseClients.push(send)
+      req.on('close', () => { const i = sseClients.indexOf(send); if (i >= 0) sseClients.splice(i, 1) })
+      return
+    }
+
+    // Parse body
+    const raw = await new Promise<string>(resolve => {
+      let d = ''
+      req.on('data', (c: Buffer) => { d += c.toString() })
+      req.on('end', () => resolve(d))
+    })
+    let args: unknown[] = []
+    try { const p = raw ? JSON.parse(raw) : []; args = Array.isArray(p) ? p : [p] } catch { args = [] }
+
+    const route = (req.url ?? '').replace(/^\/api\//, '')
+    try {
+      let result: unknown
+      switch (route) {
+        case 'platform':                             result = process.platform; break
+        case 'check-prerequisites':                  result = await getPrerequisiteStatus(); break
+        case 'install-missing-windows-prerequisites':result = await installMissingWindowsPrerequisites(); break
+        case 'run-gcloud-auth':                      await runGcloudAuth(args[0] as GcloudAuthTarget); result = null; break
+        case 'get-config':                           result = readEnv(); break
+        case 'save-config': {
+          writeEnv(args[0] as Record<string, string>)
+          try { await runScript('setup.sh') } catch { /* non-fatal */ }
+          result = null; break
+        }
+        case 'vm-status': {
+          const env = readEnv()
+          if (!env.PROJECT_ID || !env.VM_NAME || !env.ZONE) { result = 'NOT_CONFIGURED'; break }
+          try { result = (await gcloud(['compute', 'instances', 'describe', env.VM_NAME, `--zone=${env.ZONE}`, `--project=${env.PROJECT_ID}`, '--format=value(status)'])).trim() }
+          catch { result = 'NOT_FOUND' }
+          break
+        }
+        case 'deploy': {
+          if (isWindows) {
+            sendLog('==> Initializing Terraform providers...\n')
+            await runWindowsTerraform(['init', '-upgrade'])
+            sendLog('==> Provisioning infrastructure...\n')
+            await runWindowsTerraform(['apply', '-auto-approve'])
+            sendLog('==> VM provisioned.\n')
+            await runWindowsPush()
+          } else {
+            await runMake('deploy')
+          }
+          result = null; break
+        }
+        case 'tf-destroy': {
+          if (isWindows) {
+            sendLog('==> Destroying infrastructure...\n')
+            await runWindowsTerraform(['destroy', '-auto-approve'])
+            sendLog('==> Infrastructure destroyed.\n')
+          } else {
+            await runMake('tf-destroy')
+          }
+          result = null; break
+        }
+        case 'vm-start': {
+          const env = readEnv(); requireConfig(env, ['VM_NAME', 'ZONE', 'PROJECT_ID'])
+          await gcloud(['compute', 'instances', 'start', env.VM_NAME, `--zone=${env.ZONE}`, `--project=${env.PROJECT_ID}`, '--quiet'])
+          result = null; break
+        }
+        case 'vm-stop': {
+          const env = readEnv(); requireConfig(env, ['VM_NAME', 'ZONE', 'PROJECT_ID'])
+          await gcloud(['compute', 'instances', 'stop', env.VM_NAME, `--zone=${env.ZONE}`, `--project=${env.PROJECT_ID}`, '--quiet'])
+          result = null; break
+        }
+        case 'open-external': await shell.openExternal(args[0] as string); result = null; break
+        case 'open-tunnel':   result = await openTunnelProcess(); break
+        case 'close-tunnel':  closeTunnelProcess(); result = null; break
+        case 'open-novnc':    result = null; break
+        case 'close-novnc':   result = null; break
+        default: res.writeHead(404); res.end('not found'); return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (err: unknown) {
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: (err as Error)?.message ?? String(err) }))
+    }
+  })
+  server.listen(3001, '127.0.0.1', () => console.log('[dev-bridge] http://127.0.0.1:3001'))
 }
 
 // ── IPC Handlers ───────────────────────────────────────────────────────────
@@ -568,7 +947,18 @@ ipcMain.handle('vm-status', async () => {
 })
 
 ipcMain.handle('deploy', async () => {
-  await runMake('deploy')
+  if (isWindows) {
+    // On Windows, run Terraform natively (internet works via Windows proxy) then
+    // use the Windows-native push function (avoids WSL/plink interop issues).
+    sendLog('==> Initializing Terraform providers...\n')
+    await runWindowsTerraform(['init', '-upgrade'])
+    sendLog('==> Provisioning infrastructure...\n')
+    await runWindowsTerraform(['apply', '-auto-approve'])
+    sendLog('==> VM provisioned.\n')
+    await runWindowsPush()
+  } else {
+    await runMake('deploy')
+  }
 })
 
 ipcMain.handle('vm-start', async () => {
@@ -584,52 +974,21 @@ ipcMain.handle('vm-stop', async () => {
 })
 
 ipcMain.handle('open-tunnel', async () => {
-  if (tunnelProcess) return { ok: true, port: 8080 }
-  const env = readEnv()
-  requireConfig(env, ['VM_NAME', 'ZONE', 'PROJECT_ID'])
-
-  return new Promise<{ ok: boolean; port: number }>((resolve, reject) => {
-    const envForTunnel = isWindows ? freshWindowsEnv() : process.env
-    const tunnelGcloudArgs = [
-      'compute', 'ssh', env.VM_NAME,
-      `--zone=${env.ZONE}`, `--project=${env.PROJECT_ID}`,
-      '--tunnel-through-iap',
-      '--', '-L', '8080:localhost:8080', '-N',
-      '-o', 'ExitOnForwardFailure=yes',
-      '-o', 'ServerAliveInterval=30',
-    ]
-    const [tunnelCmd, tunnelArgs] = isWindows
-      ? [(process.env.ComSpec ?? join(winSys32(), 'cmd.exe')) as string, ['/c', 'gcloud', ...tunnelGcloudArgs]]
-      : ['gcloud' as string, tunnelGcloudArgs]
-    const proc = spawn(tunnelCmd, tunnelArgs, { env: envForTunnel, windowsHide: false })
-
-    proc.on('error', (err) => reject(err))
-
-    // Give the tunnel up to 8s to establish before declaring success
-    const timer = setTimeout(() => {
-      tunnelProcess = proc
-      proc.on('close', () => { tunnelProcess = null })
-      resolve({ ok: true, port: 8080 })
-    }, 8000)
-
-    // If the process exits before the timer fires, the tunnel failed
-    proc.once('close', (code) => {
-      clearTimeout(timer)
-      reject(new Error(`IAP tunnel exited early (code ${code}). Is the VM running?`))
-    })
-  })
+  return await openTunnelProcess()
 })
 
 ipcMain.handle('close-tunnel', async () => {
-  tunnelProcess?.kill()
-  tunnelProcess = null
+  closeTunnelProcess()
 })
 
-ipcMain.handle('open-novnc', async () => {
-  mainWindow?.loadURL('http://localhost:8080/vnc.html?autoconnect=true&reconnect=true')
+ipcMain.handle('open-novnc', async (_e, requestedPort?: number) => {
+  const port = requestedPort ?? activeTunnelPort ?? 8080
+  await shell.openExternal(`http://localhost:${port}/vnc.html?reconnect=true`)
 })
 
 ipcMain.handle('close-novnc', async () => {
+  const currentUrl = mainWindow?.webContents.getURL() ?? ''
+  if (!/\/vnc\.html(\?|$)/.test(currentUrl)) return
   if (isDev) mainWindow?.loadURL((process.env['ELECTRON_RENDERER_URL'] ?? 'http://localhost:5173') + '#/dashboard')
   else mainWindow?.loadFile(join(__dirname, '../renderer/index.html'), { hash: '/dashboard' })
 })
@@ -637,5 +996,11 @@ ipcMain.handle('close-novnc', async () => {
 ipcMain.handle('open-external', (_e, url: string) => shell.openExternal(url))
 
 ipcMain.handle('tf-destroy', async () => {
-  await runMake('tf-destroy')
+  if (isWindows) {
+    sendLog('==> Destroying infrastructure...\n')
+    await runWindowsTerraform(['destroy', '-auto-approve'])
+    sendLog('==> Infrastructure destroyed.\n')
+  } else {
+    await runMake('tf-destroy')
+  }
 })

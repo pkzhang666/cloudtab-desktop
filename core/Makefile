@@ -119,6 +119,22 @@ check:
 	fi
 	@printf "$(GREEN)==> Done.$(NC)\n"
 
+# Internal check used by tf-apply/deploy: only verifies tools + auth needed to
+# run Terraform and gcloud SSH/SCP.  Docker is NOT required for cloud deploys.
+.PHONY: _check_deploy
+_check_deploy:
+	@command -v terraform >/dev/null 2>&1 \
+		|| { printf "$(RED)✗ terraform not found$(NC)\n"; exit 1; }
+	@command -v gcloud >/dev/null 2>&1 \
+		|| { printf "$(RED)✗ gcloud not found$(NC)\n"; exit 1; }
+	@gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>/dev/null | grep -q . \
+		|| { printf "$(RED)✗ not logged in — run: gcloud auth login$(NC)\n"; exit 1; }
+	@gcloud auth application-default print-access-token >/dev/null 2>&1 \
+		|| { printf "$(RED)✗ no ADC — run: gcloud auth application-default login$(NC)\n"; exit 1; }
+	@test -f .env \
+		|| { printf "$(RED)✗ .env missing — run make setup$(NC)\n"; exit 1; }
+
+
 # =============================================================================
 # SETUP (first-time)
 # =============================================================================
@@ -153,7 +169,7 @@ tf-plan:
 	cd $(TF_DIR) && terraform plan
 
 .PHONY: tf-apply
-tf-apply: check
+tf-apply: _check_deploy
 	@printf "$(BLUE)==> Provisioning infrastructure...$(NC)\n"
 	cd $(TF_DIR) && terraform apply -auto-approve
 	@printf "$(GREEN)==> VM provisioned.$(NC)\n"

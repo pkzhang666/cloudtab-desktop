@@ -6,11 +6,13 @@ type TunnelStatus = 'closed' | 'opening' | 'open' | 'error'
 interface AppState {
   vmStatus: VmStatus
   tunnelStatus: TunnelStatus
+  tunnelPort: number
   logs: string[]
   deploying: boolean
 
   setVmStatus:     (s: VmStatus)     => void
   setTunnelStatus: (s: TunnelStatus) => void
+  setTunnelPort:   (p: number)       => void
   appendLog:       (line: string)    => void
   clearLogs:       ()                => void
   setDeploying:    (b: boolean)      => void
@@ -19,11 +21,13 @@ interface AppState {
 export const useStore = create<AppState>((set) => ({
   vmStatus:     'LOADING',
   tunnelStatus: 'closed',
+  tunnelPort:   8080,
   logs:         [],
   deploying:    false,
 
   setVmStatus:     (vmStatus)     => set({ vmStatus }),
   setTunnelStatus: (tunnelStatus) => set({ tunnelStatus }),
+  setTunnelPort:   (tunnelPort)   => set({ tunnelPort }),
   appendLog:       (line)         => set(s => ({ logs: [...s.logs.slice(-500), line] })),
   clearLogs:       ()             => set({ logs: [] }),
   setDeploying:    (deploying)    => set({ deploying }),

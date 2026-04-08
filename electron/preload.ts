@@ -23,7 +23,7 @@ contextBridge.exposeInMainWorld('api', {
   // Tunnel + noVNC
   openTunnel:  () => ipcRenderer.invoke('open-tunnel'),
   closeTunnel: () => ipcRenderer.invoke('close-tunnel'),
-  openNovnc:   () => ipcRenderer.invoke('open-novnc'),
+  openNovnc:   (port?: number) => ipcRenderer.invoke('open-novnc', port),
   closeNovnc:  () => ipcRenderer.invoke('close-novnc'),
 
   // Utilities

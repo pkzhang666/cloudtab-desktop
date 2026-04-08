@@ -32,6 +32,7 @@ export default function Onboarding() {
     SUBNET_CIDR:  '10.0.0.0/24',
     VNC_PASSWORD: '',
     RESOLUTION:   '1920x1080x24',
+    LOCAL_TUNNEL_PORT: '8080',
   })
 
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
@@ -102,6 +103,12 @@ export default function Onboarding() {
   // Step 3 — save config + run setup
   async function handleSave() {
     if (config.VNC_PASSWORD.length < 8) { setError('Password must be at least 8 characters.'); return }
+    if (config.LOCAL_TUNNEL_PORT) {
+      const p = Number(config.LOCAL_TUNNEL_PORT)
+      if (!Number.isInteger(p) || p < 1024 || p > 65535) {
+        setError('Preferred local tunnel port must be an integer between 1024 and 65535.'); return
+      }
+    }
     setSaving(true); setError('')
     try {
       await window.api.saveConfig({ ...config, SETUP_COMPLETE: '1' })
@@ -146,9 +153,9 @@ export default function Onboarding() {
             {prereqs && (
               <div className="space-y-2">
                 {Object.entries({
-                  gcloud: 'Google Cloud SDK (gcloud)',
-                  'gcloud-auth': 'gcloud auth login',
-                  adc: 'gcloud auth application-default login',
+                  gcloud: isWindows ? 'Google Cloud SDK (gcloud on Windows host)' : 'Google Cloud SDK (gcloud)',
+                  'gcloud-auth': isWindows ? 'gcloud auth login (Windows host)' : 'gcloud auth login',
+                  adc: isWindows ? 'gcloud auth application-default login (Windows host)' : 'gcloud auth application-default login',
                   ...(isWindows ? { wsl: 'WSL 2 + build-essential + terraform' } : {}),
                 }).map(([k, label]) => (
                   <div key={k} className="flex items-center gap-3 bg-gray-900 rounded-lg px-4 py-3">
@@ -171,6 +178,13 @@ export default function Onboarding() {
                         then restart when prompted.{' '}
                         After restart, open <strong className="text-white">Ubuntu</strong> from the Start menu once to
                         finish distro setup, then click Re-check.
+                      </p>
+                    )}
+                    {isWindows && (
+                      <p className="text-gray-400">
+                        Sign-in steps for <strong className="text-white">gcloud auth login</strong> and
+                        <strong className="text-white"> application-default login</strong> run on
+                        <strong className="text-white"> Windows</strong>, not inside WSL.
                       </p>
                     )}
                   </div>
@@ -199,8 +213,8 @@ export default function Onboarding() {
                   <button onClick={() => handleGcloudAuth('gcloud-auth')} disabled={!!authenticating || checking}
                     className="w-full py-2.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
                     {authenticating === 'gcloud-auth'
-                      ? <><Loader2 size={16} className="animate-spin" />Opening gcloud login…</>
-                      : <>Sign in to gcloud</>}
+                      ? <><Loader2 size={16} className="animate-spin" />Opening Windows gcloud login…</>
+                      : <>Sign in to gcloud (Windows)</>}
                   </button>
                 )}
 
@@ -208,8 +222,8 @@ export default function Onboarding() {
                   <button onClick={() => handleGcloudAuth('adc')} disabled={!!authenticating || checking}
                     className="w-full py-2.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
                     {authenticating === 'adc'
-                      ? <><Loader2 size={16} className="animate-spin" />Configuring ADC…</>
-                      : <>Set up application default credentials</>}
+                      ? <><Loader2 size={16} className="animate-spin" />Configuring Windows ADC…</>
+                      : <>Set up application default credentials (Windows)</>}
                   </button>
                 )}
 
@@ -274,6 +288,17 @@ export default function Onboarding() {
                 </select>
               </Field>
             </div>
+
+            <Field label="Preferred local tunnel port" hint="If busy, CloudTab auto-selects a nearby free port">
+              <input
+                type="number"
+                min="1024"
+                max="65535"
+                value={config.LOCAL_TUNNEL_PORT}
+                onChange={set('LOCAL_TUNNEL_PORT')}
+                className="input"
+              />
+            </Field>
 
             <div className="flex gap-2 pt-2">
               <button onClick={() => setStep(1)}

@@ -19,6 +19,7 @@ const DEFAULTS: Record<string, string> = {
   SUBNET_CIDR:  '10.0.0.0/24',
   VNC_PASSWORD: '',
   RESOLUTION:   '1920x1080x24',
+  LOCAL_TUNNEL_PORT: '8080',
 }
 
 export default function Settings() {
@@ -45,6 +46,12 @@ export default function Settings() {
     if (!config.VM_NAME.trim())    { setError('VM name is required.'); return }
     if (config.VNC_PASSWORD && config.VNC_PASSWORD.length < 8) {
       setError('Password must be at least 8 characters.'); return
+    }
+    if (config.LOCAL_TUNNEL_PORT) {
+      const p = Number(config.LOCAL_TUNNEL_PORT)
+      if (!Number.isInteger(p) || p < 1024 || p > 65535) {
+        setError('Local tunnel port must be an integer between 1024 and 65535.'); return
+      }
     }
     setSaving(true); setError('')
     try {
@@ -150,6 +157,17 @@ export default function Settings() {
               <option value="2560x1440x24">2560×1440 (2K)</option>
               <option value="1280x800x24">1280×800 (compact)</option>
             </select>
+          </Field>
+
+          <Field label="Local Tunnel Port" hint="CloudTab uses this as the preferred local port; if busy, it auto-picks a nearby free port">
+            <input
+              type="number"
+              min="1024"
+              max="65535"
+              value={config.LOCAL_TUNNEL_PORT}
+              onChange={set('LOCAL_TUNNEL_PORT')}
+              className="input"
+            />
           </Field>
         </section>
 

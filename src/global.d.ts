@@ -22,7 +22,7 @@ declare global {
 
       openTunnel:  () => Promise<{ ok: boolean; port: number }>
       closeTunnel: () => Promise<void>
-      openNovnc:   () => Promise<void>
+      openNovnc:   (port?: number) => Promise<void>
       closeNovnc:  () => Promise<void>
 
       openExternal: (url: string) => Promise<void>

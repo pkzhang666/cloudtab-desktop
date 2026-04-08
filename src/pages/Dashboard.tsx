@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Play, Square, Wifi, WifiOff, Settings, RefreshCw,
-  Terminal, ChevronDown, ChevronUp, Loader2, Globe, AlertCircle, ArrowLeft,
+  Terminal, ChevronDown, ChevronUp, Loader2, Globe, AlertCircle, ArrowLeft, Trash2,
 } from 'lucide-react'
 import { useStore } from '../store'
 
@@ -30,7 +30,7 @@ export default function Dashboard() {
   const navigate = useNavigate()
   const {
     vmStatus, tunnelStatus, logs, deploying,
-    setVmStatus, setTunnelStatus, appendLog, clearLogs, setDeploying,
+    tunnelPort, setVmStatus, setTunnelStatus, setTunnelPort, appendLog, clearLogs, setDeploying,
   } = useStore()
 
   const [showLogs, setShowLogs] = useState(false)
@@ -97,9 +97,10 @@ export default function Dashboard() {
   const handleConnect = withAction('connect', async () => {
     setTunnelStatus('opening')
     try {
-      await window.api.openTunnel()
+      const tunnel = await window.api.openTunnel()
+      setTunnelPort(tunnel.port)
       setTunnelStatus('open')
-      await window.api.openNovnc()
+      await window.api.openNovnc(tunnel.port)
     } catch (e) {
       setTunnelStatus('error')
       throw e
@@ -109,7 +110,29 @@ export default function Dashboard() {
   const handleDisconnect = withAction('disconnect', async () => {
     await window.api.closeTunnel()
     setTunnelStatus('closed')
+    setTunnelPort(8080)
     await window.api.closeNovnc()
+  })
+
+  const handleDestroyAll = withAction('destroy', async () => {
+    const ok = confirm(
+      'Destroy all deployed resources?\n\n' +
+      'This will permanently remove VM, network, NAT, firewall rules, and IAM resources created by CloudTab.\n\n' +
+      'This action cannot be undone.'
+    )
+    if (!ok) return
+    setDeploying(true); setShowLogs(true)
+    try {
+      if (tunnelStatus === 'open') {
+        await window.api.closeTunnel()
+        setTunnelStatus('closed')
+        setTunnelPort(8080)
+      }
+      await window.api.tfDestroy()
+    } finally {
+      setDeploying(false)
+    }
+    setVmStatus(await window.api.vmStatus() as any)
   })
 
   const isRunning   = vmStatus === 'RUNNING'
@@ -171,7 +194,7 @@ export default function Dashboard() {
           {tunnelStatus !== 'closed' && (
             <div className="flex items-center gap-2 text-sm">
               {tunnelStatus === 'open'
-                ? <><Wifi size={14} className="text-blue-400" /><span className="text-blue-400">IAP tunnel active — port 8080</span></>
+                ? <><Wifi size={14} className="text-blue-400" /><span className="text-blue-400">IAP tunnel active — port {tunnelPort}</span></>
                 : tunnelStatus === 'opening'
                 ? <><Loader2 size={14} className="text-yellow-400 animate-spin" /><span className="text-yellow-400">Opening tunnel…</span></>
                 : <><WifiOff size={14} className="text-red-400" /><span className="text-red-400">Tunnel error — try again</span></>}
@@ -219,6 +242,15 @@ export default function Dashboard() {
               )}
             </div>
           )}
+
+          {!notDeployed && (
+            <button onClick={handleDestroyAll} disabled={busy}
+              className="w-full py-2.5 bg-red-900/50 hover:bg-red-800/60 border border-red-700/50 rounded-xl text-red-300 font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
+              {actionLoading === 'destroy'
+                ? <><Loader2 size={16} className="animate-spin" />Destroying resources…</>
+                : <><Trash2 size={16} />Destroy All Resources</>}
+            </button>
+          )}
         </div>
 
         {/* Contextual hints */}
@@ -226,7 +258,7 @@ export default function Dashboard() {
           <p className="text-xs text-gray-500 text-center">Start the VM, then Connect to open your Chrome session.</p>
         )}
         {isConnected && (
-          <p className="text-xs text-gray-500 text-center">Chrome is running at localhost:8080 via IAP tunnel.</p>
+          <p className="text-xs text-gray-500 text-center">Chrome is running at localhost:{tunnelPort} via IAP tunnel. Enter your VNC password on the noVNC connect screen if prompted.</p>
         )}
         {tunnelStatus === 'error' && (
           <p className="text-xs text-yellow-600 text-center">Tunnel failed. Make sure the VM is running and try again.</p>

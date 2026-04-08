@@ -13,6 +13,8 @@ services:
       - "127.0.0.1:8080:8080"
     environment:
       - RESOLUTION=${RESOLUTION:-1920x1080x24}
+      - WINDOW_OFFSET_Y=${WINDOW_OFFSET_Y:-30}
+      - EXTRA_HEIGHT_PX=${EXTRA_HEIGHT_PX:-30}
       - VNC_PASSWORD=${VNC_PASSWORD:?VNC_PASSWORD must be set in .env}
       - DISPLAY=:99
     volumes:

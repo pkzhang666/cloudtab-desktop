@@ -1,3 +1,4 @@
+import './bridge'
 import { useEffect, useState } from 'react'
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom'
 import Onboarding from './pages/Onboarding'
