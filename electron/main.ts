@@ -81,16 +81,7 @@ function toWslPath(winPath: string): string {
 function commandExists(cmd: string): boolean {
   try {
     if (isWindows) {
-      // Ask PowerShell to resolve the command using the *current* system PATH
-      // (the Electron process inherits a stale PATH from launch time; newly installed
-      //  tools only appear after reading from the registry)
-      const result = require('child_process').spawnSync(
-        'powershell.exe',
-        ['-NoProfile', '-Command',
-         `$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User'); Get-Command '${cmd.replace(/'/g, "''")}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source`],
-        { stdio: 'pipe' },
-      )
-      return result.status === 0
+      return !!resolveWindowsCommandPath(cmd)
     } else {
       const result = require('child_process').spawnSync('which', [cmd], { stdio: 'pipe' })
       return result.status === 0
@@ -112,14 +103,24 @@ function freshWindowsEnv(): NodeJS.ProcessEnv {
 }
 
 function resolveWindowsCommandPath(cmd: string): string | null {
-  const ps = require('child_process').spawnSync(
-    'powershell.exe',
-    ['-NoProfile', '-Command',
-     `$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User'); (Get-Command '${cmd.replace(/'/g, "''")}' -ErrorAction SilentlyContinue).Source`],
-    { encoding: 'utf8', stdio: 'pipe' },
+  const result = require('child_process').spawnSync(
+    'where.exe',
+    [cmd],
+    { encoding: 'utf8', stdio: 'pipe', env: freshWindowsEnv() },
   )
-  const resolved = (ps.stdout || '').trim()
-  return resolved || null
+  if (result.status !== 0) return null
+
+  const candidates = String(result.stdout || '')
+    .split(/\r?\n/)
+    .map((s: string) => s.trim())
+    .filter(Boolean)
+
+  const preferred = candidates.find((p: string) => /\.exe$/i.test(p))
+    || candidates.find((p: string) => /\.cmd$/i.test(p))
+    || candidates.find((p: string) => /\.bat$/i.test(p))
+    || candidates[0]
+
+  return preferred || null
 }
 
 // Run a gcloud command safely — args passed as array, never interpolated into a string
