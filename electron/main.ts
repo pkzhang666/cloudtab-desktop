@@ -253,8 +253,14 @@ async function getPrerequisiteStatus(): Promise<Record<string, boolean>> {
   for (const tool of ['gcloud', 'terraform', 'docker']) {
     results[tool] = commandExists(tool)
   }
-  // On Windows, wsl.exe existing is not enough — we need a distro installed.
-  if (isWindows) results['wsl'] = commandExists('wsl') && wslHasDistro()
+  // On Windows, wsl.exe + distro are necessary. Also auto-install build-essential on first check after distro is ready.
+  if (isWindows) {
+    results['wsl'] = commandExists('wsl') && wslHasDistro()
+    if (results['wsl']) {
+      // Try to ensure build-essential is installed — this is fire-and-forget auto-install
+      results['wsl'] = await ensureWslBuildEssential()
+    }
+  }
 
   results['gcloud-auth'] = await hasActiveGcloudLogin()
 
@@ -329,6 +335,39 @@ function getWslEnv(): NodeJS.ProcessEnv {
   }
 }
 
+// Check if build-essential (make, gcc, etc.) is installed in WSL, and auto-install if not.
+// Runs as root via `--user root` to avoid sudo password prompts on first-run setup.
+async function ensureWslBuildEssential(): Promise<boolean> {
+  if (!isWindows || !wslHasDistro()) return false
+
+  try {
+    // Test if make exists
+    const result = require('child_process').spawnSync(
+      'wsl',
+      ['-d', 'Ubuntu-24.04', '--user', 'root', '--', 'which', 'make'],
+      { encoding: 'utf8', stdio: 'pipe', timeout: 10_000 },
+    )
+    if (result.status === 0) return true  // make already installed
+
+    // Not installed, install build-essential
+    mainWindow?.webContents.send('log', 'Installing build-essential in Ubuntu (this may take a minute)...\n')
+    const install = require('child_process').spawnSync(
+      'wsl',
+      ['-d', 'Ubuntu-24.04', '--user', 'root', '--', 'bash', '-c',
+       'apt-get update && apt-get install -y build-essential'],
+      { encoding: 'utf8', stdio: 'pipe', timeout: 120_000 },  // 2 min timeout for apt
+    )
+    if (install.status === 0) {
+      mainWindow?.webContents.send('log', 'build-essential installed successfully.\n')
+      return true
+    }
+    mainWindow?.webContents.send('log', `Failed to auto-install build-essential: ${install.stderr}\n`)
+    return false
+  } catch (e) {
+    return false
+  }
+}
+
 function quotePowerShell(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
@@ -379,10 +418,10 @@ async function installWindowsPrerequisite(target: WindowsInstallTarget): Promise
 
   switch (target) {
     case 'wsl':
-      mainWindow?.webContents.send('log', 'Installing WSL 2 and Ubuntu...\n')
-      // --install defaults to Ubuntu. The user must restart Windows and launch
-      // Ubuntu once from the Start menu to finish the distro initialisation.
-      await runElevatedWindowsProcess('wsl', ['--install', '-d', 'Ubuntu'])
+      mainWindow?.webContents.send('log', 'Installing WSL 2 and Ubuntu 24.04...\n')
+      // After restart, build-essential will be auto-installed on the next Re-check.
+      await runElevatedWindowsProcess('wsl', ['--install', '-d', 'Ubuntu-24.04'])
+      mainWindow?.webContents.send('log', 'WSL installation queued. Restart Windows when prompted.\n')
       return { restartRequired: true }
     case 'gcloud':
       mainWindow?.webContents.send('log', 'Installing Google Cloud SDK with winget...\n')
