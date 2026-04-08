@@ -136,10 +136,12 @@ tf-init:
 
 .PHONY: tf-apis
 tf-apis: check
-	@printf "$(BLUE)==> Enabling GCP APIs (compute, iap)...$(NC)\n"
+	@printf "$(BLUE)==> Enabling GCP APIs (compute, iap, iam, cloudresourcemanager)...$(NC)\n"
 	cd $(TF_DIR) && terraform apply \
 		-target='google_project_service.apis["compute.googleapis.com"]' \
 		-target='google_project_service.apis["iap.googleapis.com"]' \
+		-target='google_project_service.apis["iam.googleapis.com"]' \
+		-target='google_project_service.apis["cloudresourcemanager.googleapis.com"]' \
 		-auto-approve
 	@printf "$(YELLOW)APIs enabled. Waiting 60s for propagation before next steps...$(NC)\n"
 	@for i in $$(seq 60 -1 1); do printf "\r  %2ds remaining...  " $$i; sleep 1; done

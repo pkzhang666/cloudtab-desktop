@@ -135,12 +135,13 @@ cd cloudtab-desktop
 npm install
 ```
 
-### Run in dev mode (Linux/Mac)
+### Run in dev mode
 
 ```bash
-unset ELECTRON_RUN_AS_NODE   # required if running inside VS Code terminal
 npm run dev
 ```
+
+> The `dev` script is cross-platform and automatically unsets `ELECTRON_RUN_AS_NODE` before launching Electron.
 
 > **Headless Linux (GCP VM):** Run `./dev-display.sh` first to start a virtual desktop (Xvfb + noVNC), then connect via browser and run `npm run dev` in the xterm.
 

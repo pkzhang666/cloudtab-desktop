@@ -95,6 +95,8 @@ else
   cd "$ROOT/terraform" && terraform apply \
     -target='google_project_service.apis["compute.googleapis.com"]' \
     -target='google_project_service.apis["iap.googleapis.com"]' \
+    -target='google_project_service.apis["iam.googleapis.com"]' \
+    -target='google_project_service.apis["cloudresourcemanager.googleapis.com"]' \
     -auto-approve
 
   # APIs are enabled but take ~60 seconds to fully propagate before

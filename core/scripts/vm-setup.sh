@@ -13,7 +13,7 @@ if ! command -v docker &>/dev/null; then
   done
 fi
 
-docker info > /dev/null 2>&1 || { echo "ERROR: Docker daemon not running"; exit 1; }
+sudo docker info > /dev/null 2>&1 || { echo "ERROR: Docker daemon not running"; exit 1; }
 echo "==> Docker OK: $(docker --version)"
 
 echo "==> Creating app directory..."

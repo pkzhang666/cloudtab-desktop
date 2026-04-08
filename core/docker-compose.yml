@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  novnc-chrome:
+    env_file:
+      - .env
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    ports:
+      - "127.0.0.1:5901:5901"
+      - "127.0.0.1:8080:8080"
+    environment:
+      - RESOLUTION=${RESOLUTION:-1920x1080x24}
+      - VNC_PASSWORD=${VNC_PASSWORD:?VNC_PASSWORD must be set in .env}
+      - DISPLAY=:99
+    volumes:
+      - chrome-data:/root/chrome-data
+    shm_size: "2gb"
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp=unconfined
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 7g
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8080"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+volumes:
+  chrome-data:
+    # Named volume — survives `docker compose down`.
+    # Deleted only by `docker compose down -v` (intentional profile wipe).
