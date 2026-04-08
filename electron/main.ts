@@ -125,17 +125,20 @@ function resolveWindowsCommandPath(cmd: string): string | null {
 
 // Run a gcloud command safely — args passed as array, never interpolated into a string.
 // On Windows, gcloud is a .cmd file and cannot be spawned directly — use cmd.exe /c.
-function gcloud(args: string[]): Promise<string> {
+function gcloud(args: string[], timeoutMs?: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const freshEnv = isWindows ? freshWindowsEnv() : undefined
     const [cmd, cmdArgs] = isWindows
       ? ['cmd.exe', ['/c', 'gcloud', ...args]]
       : ['gcloud', args]
-    execFile(cmd, cmdArgs, { encoding: 'utf8', ...(freshEnv && { env: freshEnv }) },
-      (err, stdout: string, stderr: string) => {
-        if (err) reject(new Error(stderr || err.message))
-        else resolve(stdout.trim())
-      })
+    execFile(cmd, cmdArgs, {
+      encoding: 'utf8',
+      ...(freshEnv && { env: freshEnv }),
+      ...(timeoutMs && { timeout: timeoutMs }),
+    }, (err, stdout: string, stderr: string) => {
+      if (err) reject(new Error(stderr || err.message))
+      else resolve(stdout.trim())
+    })
   })
 }
 
@@ -248,6 +251,9 @@ function getGcloudConfigDir(): string {
 }
 
 function getAdcCredentialPath(): string {
+  // Respect CLOUDSDK_CONFIG if the user has set it (overrides default config dir)
+  const sdkConfig = process.env.CLOUDSDK_CONFIG
+  if (sdkConfig) return join(sdkConfig, 'application_default_credentials.json')
   return join(getGcloudConfigDir(), 'application_default_credentials.json')
 }
 
@@ -258,9 +264,9 @@ async function hasApplicationDefaultCredentials(): Promise<boolean> {
   // Avoids hanging on print-access-token while another gcloud auth process is in flight.
   if (existsSync(getAdcCredentialPath())) return true
 
-  // Fallback: validate via token (catches revoked / corrupt credential files).
+  // Fallback: validate via token with a 10-second timeout to avoid hanging.
   try {
-    await gcloud(['auth', 'application-default', 'print-access-token'])
+    await gcloud(['auth', 'application-default', 'print-access-token'], 10_000)
     return true
   } catch {
     return false
@@ -361,8 +367,17 @@ async function runGcloudAuth(target: GcloudAuthTarget): Promise<void> {
     ? ['auth', 'application-default', 'login']
     : ['auth', 'login']
 
-  mainWindow?.webContents.send('log', `Running gcloud ${args.join(' ')}...\n`)
-  await runLoggedProcess('gcloud', args)
+  mainWindow?.webContents.send('log', `Launching: gcloud ${args.join(' ')}...\n`)
+
+  // Launch gcloud auth as a detached, independent process so the browser-based
+  // OAuth flow doesn't block the IPC call. The IPC returns immediately;
+  // the user completes login in the browser then clicks Re-check.
+  const env = isWindows ? freshWindowsEnv() : process.env
+  const [cmd, cmdArgs] = isWindows
+    ? ['cmd.exe', ['/c', 'gcloud', ...args]]
+    : ['gcloud', args]
+  const child = spawn(cmd, cmdArgs, { env, windowsHide: false, stdio: 'ignore', detached: true })
+  child.unref()
 }
 
 // ── IPC Handlers ───────────────────────────────────────────────────────────

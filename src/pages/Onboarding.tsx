@@ -86,8 +86,12 @@ export default function Onboarding() {
     setPrereqMessage('')
     try {
       await window.api.runGcloudAuth(target)
-      setPrereqMessage(target === 'adc' ? 'Application default credentials configured.' : 'gcloud login completed.')
-      await checkPrereqs()
+      // runGcloudAuth returns immediately — the browser is open for the user to complete auth.
+      setPrereqMessage(
+        target === 'adc'
+          ? 'A browser window has opened for ADC setup. Complete sign-in, then click Re-check.'
+          : 'A browser window has opened for gcloud sign-in. Complete sign-in, then click Re-check.'
+      )
     } catch (e: any) {
       setPrereqError(e?.message ?? 'Authentication failed.')
     } finally {
@@ -209,7 +213,7 @@ export default function Onboarding() {
                 )}
 
                 <div className="flex gap-2 pt-2">
-                  <button onClick={checkPrereqs}
+                  <button onClick={() => { setAuthenticating(''); checkPrereqs() }}
                     className="flex-1 py-2.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm transition-colors">
                     Re-check
                   </button>
