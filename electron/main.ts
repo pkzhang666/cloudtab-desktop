@@ -3,7 +3,7 @@ import { join } from 'path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { spawn, execFile, ChildProcess } from 'child_process'
 
-type WindowsInstallTarget = 'wsl' | 'gcloud' | 'terraform' | 'docker'
+type WindowsInstallTarget = 'wsl' | 'gcloud'
 type GcloudAuthTarget = 'gcloud-auth' | 'adc'
 
 const isWindows = process.platform === 'win32'
@@ -95,7 +95,7 @@ function wslHasDistro(): boolean {
   try {
     const result = require('child_process').spawnSync(
       'wsl.exe', ['--list', '--quiet'],
-      { encoding: 'utf16le', stdio: 'pipe' },  // wsl outputs UTF-16 LE
+      { encoding: 'utf16le', stdio: 'pipe', env: freshWindowsEnv() },  // wsl outputs UTF-16 LE
     )
     if (result.status !== 0) return false
     const lines = String(result.stdout || '')
@@ -169,11 +169,11 @@ function runScript(script: string, args: string[] = []): Promise<string> {
   }
   const scriptPath = join(CORE_DIR, 'scripts', script)
   const [cmd, cmdArgs] = isWindows
-    ? ['wsl', ['bash', toWslPath(scriptPath), ...args]]
+    ? ['wsl', ['--user', 'root', '--', 'env', '-i', ...buildWslLinuxEnv(), 'bash', toWslPath(scriptPath), ...args]]
     : ['bash', [scriptPath, ...args]]
 
   return new Promise((resolve, reject) => {
-    const env = isWindows ? getWslEnv() : process.env
+    const env = isWindows ? freshWindowsEnv() : process.env
     const proc = spawn(cmd, cmdArgs, { env })
     let out = '', err = ''
     proc.stdout.on('data', (d) => { out += d; mainWindow?.webContents.send('log', d.toString()) })
@@ -201,11 +201,11 @@ function runMake(target: string): Promise<string> {
   }
   const makefileDir = CORE_DIR
   const [cmd, cmdArgs] = isWindows
-    ? ['wsl', ['make', '-C', toWslPath(makefileDir), target]]
+    ? ['wsl', ['--user', 'root', '--', 'env', '-i', ...buildWslLinuxEnv(), 'make', '-C', toWslPath(makefileDir), target]]
     : ['make', ['-C', makefileDir, target]]
 
   return new Promise((resolve, reject) => {
-    const env = isWindows ? getWslEnv() : process.env
+    const env = isWindows ? freshWindowsEnv() : process.env
     const proc = spawn(cmd, cmdArgs, { env })
     let out = '', err = ''
     proc.stdout.on('data', (d) => { out += d; mainWindow?.webContents.send('log', d.toString()) })
@@ -255,9 +255,8 @@ async function getPrerequisiteStatus(): Promise<Record<string, boolean>> {
   if (isWindows) {
     results['wsl'] = commandExists('wsl') && wslHasDistro()
     if (results['wsl']) {
-      // Auto-install build-essential and tools (terraform, docker) in WSL
-      await ensureWslBuildEssential()
-      results['wsl'] = await ensureWslToolsInstalled()
+      // Auto-install build-essential, terraform, docker, gcloud in WSL
+      results['wsl'] = await ensureWslEnvironment()
     }
   }
 
@@ -323,94 +322,87 @@ async function hasApplicationDefaultCredentials(): Promise<boolean> {
   }
 }
 
-// Get a minimal environment for WSL with no Windows PATH/proxy/env vars.
-// This prevents 'Failed to translate' warnings and path-resolution issues.
-function getWslEnv(): NodeJS.ProcessEnv {
-  return {
-    // Explicitly don't pass any Windows env vars
-    PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-    HOME: '/root',
-    SHELL: '/bin/bash',
+// Build KEY=VALUE pairs for `env -i` inside WSL.
+// Provides a clean Linux environment (no Windows PATH translation warnings)
+// and shares gcloud/ADC credentials from Windows so WSL gcloud uses the
+// same auth state — users don't need to authenticate twice.
+function buildWslLinuxEnv(): string[] {
+  const pairs: string[] = [
+    'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    'HOME=/root',
+    'SHELL=/bin/bash',
+    'DEBIAN_FRONTEND=noninteractive',
+  ]
+  if (isWindows) {
+    const gcloudConfigWsl = toWslPath(getGcloudConfigDir())
+    // Let gcloud in WSL share the same credentials as Windows gcloud
+    pairs.push(`CLOUDSDK_CONFIG=${gcloudConfigWsl}`)
+    // Let terraform / other ADC-aware tools find credentials (terraform ignores CLOUDSDK_CONFIG)
+    pairs.push(`GOOGLE_APPLICATION_CREDENTIALS=${gcloudConfigWsl}/application_default_credentials.json`)
   }
+  return pairs
 }
 
-// Check if build-essential (make, gcc, etc.) is installed in WSL, and auto-install if not.
-async function ensureWslBuildEssential(): Promise<boolean> {
+// Auto-install all required Linux tools in WSL (idempotent — safe to call on every Re-check).
+// Installs: build-essential, terraform (HashiCorp APT), docker.io + docker-compose, google-cloud-cli (Google APT).
+// Returns true when all tools are present after the attempt.
+async function ensureWslEnvironment(): Promise<boolean> {
   if (!isWindows || !wslHasDistro()) return false
 
-  try {
-    const result = require('child_process').spawnSync(
-      'wsl',
-      ['-d', 'Ubuntu-24.04', '--user', 'root', '--', 'which', 'make'],
-      { encoding: 'utf8', stdio: 'pipe', timeout: 10_000 },
-    )
-    if (result.status === 0) return true  // make already installed
+  const wslEnv = freshWindowsEnv()
 
-    mainWindow?.webContents.send('log', 'Installing build-essential in Ubuntu...\\n')
-    const install = require('child_process').spawnSync(
-      'wsl',
-      ['-d', 'Ubuntu-24.04', '--user', 'root', '--', 'bash', '-c',
-       'apt-get update && apt-get install -y build-essential'],
-      { encoding: 'utf8', stdio: 'pipe', timeout: 120_000 },
-    )
-    if (install.status === 0) {
-      mainWindow?.webContents.send('log', 'build-essential installed successfully.\\n')
-      return true
-    }
-    mainWindow?.webContents.send('log', `Failed to auto-install build-essential: ${install.stderr}\\n`)
-    return false
-  } catch (e) {
-    return false
-  }
-}
+  // Quick check: all tools already present?
+  const quickCheck = require('child_process').spawnSync(
+    'wsl',
+    ['--user', 'root', '--', 'bash', '-c',
+     'command -v make && command -v terraform && command -v docker && command -v gcloud'],
+    { encoding: 'utf8', stdio: 'pipe', timeout: 15_000, env: wslEnv },
+  )
+  if (quickCheck.status === 0) return true
 
-// Check if terraform and docker are installed in WSL, and auto-install if not.
-async function ensureWslToolsInstalled(): Promise<boolean> {
-  if (!isWindows || !wslHasDistro()) return false
+  mainWindow?.webContents.send('log', 'Installing required tools in Ubuntu (this may take a few minutes)...\n')
 
-  try {
-    // Check if terraform exists
-    const tfResult = require('child_process').spawnSync(
-      'wsl',
-      ['-d', 'Ubuntu-24.04', '--user', 'root', '--', 'which', 'terraform'],
-      { encoding: 'utf8', stdio: 'pipe', timeout: 10_000 },
-    )
-    const hasterraform = tfResult.status === 0
+  // Build the install script as a joined string to avoid TypeScript template-literal
+  // interpolation of bash variables like ${VAR} or line-continuation escaping issues.
+  const installScript = [
+    'set -e',
+    'DEBIAN_FRONTEND=noninteractive',
+    'apt-get update -qq',
+    'apt-get install -y curl gnupg software-properties-common lsb-release apt-transport-https ca-certificates build-essential',
+    // Docker
+    'if ! command -v docker >/dev/null 2>&1; then',
+    '  apt-get install -y docker.io docker-compose',
+    'fi',
+    // Terraform — not in Ubuntu repos, requires HashiCorp APT repo
+    'if ! command -v terraform >/dev/null 2>&1; then',
+    '  curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg',
+    '  echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/hashicorp.list',
+    '  apt-get update -qq',
+    '  apt-get install -y terraform',
+    'fi',
+    // Google Cloud CLI
+    'if ! command -v gcloud >/dev/null 2>&1; then',
+    '  curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg',
+    '  echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list',
+    '  apt-get update -qq',
+    '  apt-get install -y google-cloud-cli',
+    'fi',
+    'echo "All WSL tools installed."',
+  ].join('\n')
 
-    // Check if docker exists
-    const dockerResult = require('child_process').spawnSync(
-      'wsl',
-      ['-d', 'Ubuntu-24.04', '--user', 'root', '--', 'which', 'docker'],
-      { encoding: 'utf8', stdio: 'pipe', timeout: 10_000 },
-    )
-    const hasDocker = dockerResult.status === 0
+  const install = require('child_process').spawnSync(
+    'wsl',
+    ['--user', 'root', '--', 'bash', '-c', installScript],
+    { encoding: 'utf8', stdio: 'pipe', timeout: 600_000, env: wslEnv },  // 10 min max
+  )
 
-    if (hasterraform && hasDocker) return true  // Both already installed
-
-    // Install missing tools
-    const toInstall = []
-    if (!hasterraform) toInstall.push('terraform')
-    if (!hasDocker) toInstall.push('docker.io')
-
-    if (toInstall.length > 0) {
-      mainWindow?.webContents.send('log', `Installing ${toInstall.join(', ')} in Ubuntu (this may take a minute)...\n`)
-      const install = require('child_process').spawnSync(
-        'wsl',
-        ['-d', 'Ubuntu-24.04', '--user', 'root', '--', 'bash', '-c',
-         `apt-get update && apt-get install -y ${toInstall.join(' ')}`],
-        { encoding: 'utf8', stdio: 'pipe', timeout: 180_000 },  // 3 min timeout
-      )
-      if (install.status === 0) {
-        mainWindow?.webContents.send('log', `Installed ${toInstall.join(', ')} successfully.\n`)
-        return true
-      }
-      mainWindow?.webContents.send('log', `Failed to auto-install tools: ${install.stderr}\n`)
-      return false
-    }
+  if (install.status === 0) {
+    mainWindow?.webContents.send('log', 'WSL environment ready.\n')
     return true
-  } catch (e) {
-    return false
   }
+
+  mainWindow?.webContents.send('log', `WSL tool installation failed:\n${install.stderr}\n`)
+  return false
 }
 
 function quotePowerShell(value: string): string {
@@ -472,20 +464,12 @@ async function installWindowsPrerequisite(target: WindowsInstallTarget): Promise
       mainWindow?.webContents.send('log', 'Installing Google Cloud SDK with winget...\n')
       await runElevatedWindowsProcess('winget', ['install', '--id', 'Google.CloudSDK', '-e', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'])
       return { restartRequired: false }
-    case 'terraform':
-      mainWindow?.webContents.send('log', 'Installing Terraform with winget...\n')
-      await runElevatedWindowsProcess('winget', ['install', '--id', 'Hashicorp.Terraform', '-e', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'])
-      return { restartRequired: false }
-    case 'docker':
-      mainWindow?.webContents.send('log', 'Installing Docker Desktop with winget...\n')
-      await runElevatedWindowsProcess('winget', ['install', '--id', 'Docker.DockerDesktop', '-e', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'])
-      return { restartRequired: false }
   }
 }
 
 async function installMissingWindowsPrerequisites(): Promise<{ installed: WindowsInstallTarget[]; restartRequired: boolean }> {
   const current = await getPrerequisiteStatus()
-  const installOrder: WindowsInstallTarget[] = ['wsl', 'gcloud', 'terraform', 'docker']
+  const installOrder: WindowsInstallTarget[] = ['wsl', 'gcloud']
   const installed: WindowsInstallTarget[] = []
   let restartRequired = false
 

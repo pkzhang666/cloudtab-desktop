@@ -104,7 +104,7 @@ export default function Onboarding() {
     if (config.VNC_PASSWORD.length < 8) { setError('Password must be at least 8 characters.'); return }
     setSaving(true); setError('')
     try {
-      await window.api.saveConfig(config)
+      await window.api.saveConfig({ ...config, SETUP_COMPLETE: '1' })
       navigate('/dashboard')
     } catch (e: any) {
       setError(e.message)

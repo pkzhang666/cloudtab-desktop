@@ -14,7 +14,7 @@ export default function App() {
       return
     }
     window.api.getConfig()
-      .then(cfg => setConfigured(!!(cfg.PROJECT_ID && cfg.VNC_PASSWORD)))
+      .then(cfg => setConfigured(!!(cfg.PROJECT_ID && cfg.VNC_PASSWORD && cfg.SETUP_COMPLETE)))
       .catch(() => setConfigured(false))
   }, [])
 
