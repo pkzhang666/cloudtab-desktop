@@ -291,6 +291,18 @@ function getWindowsProxyEnv(): Record<string, string> {
 // Google APIs directly; Windows has proxy access). Streams output via sendLog().
 function runWindowsTerraform(args: string[], options?: { timeoutMs?: number }): Promise<string> {
   const terraformDir = join(CORE_DIR, 'terraform')
+  const command = args[0] ?? ''
+  const effectiveArgs = [...args]
+
+  // Never block on stdin prompts in app-driven runs.
+  if (!effectiveArgs.includes('-input=false')) {
+    effectiveArgs.push('-input=false')
+  }
+  // Ensure variable values are loaded from tfvars for non-interactive commands.
+  if (['apply', 'destroy', 'plan'].includes(command) && !effectiveArgs.some(a => a.startsWith('-var-file='))) {
+    effectiveArgs.push('-var-file=terraform.tfvars')
+  }
+
   const freshEnv = freshWindowsEnv()
   const adcPath = join(getGcloudConfigDir(), 'application_default_credentials.json')
   const env: NodeJS.ProcessEnv = {
@@ -313,8 +325,8 @@ function runWindowsTerraform(args: string[], options?: { timeoutMs?: number }): 
   } catch { /* fallback to GOOGLE_APPLICATION_CREDENTIALS */ }
   // terraform.exe is on PATH (validated at startup via prerequisites check)
   return new Promise((resolve, reject) => {
-    const timeoutMs = options?.timeoutMs ?? (args[0] === 'init' ? 3 * 60_000 : 0)
-    const proc = spawn('terraform', args, { cwd: terraformDir, env })
+    const timeoutMs = options?.timeoutMs ?? (command === 'init' ? 3 * 60_000 : 0)
+    const proc = spawn('terraform', effectiveArgs, { cwd: terraformDir, env })
     let out = '', err = ''
     let settled = false
 
@@ -337,7 +349,7 @@ function runWindowsTerraform(args: string[], options?: { timeoutMs?: number }): 
         sendLog(`\n==> Terraform ${args[0]} timed out after ${Math.floor(timeoutMs / 60_000)} minutes. Stopping process...\n`)
         proc.kill()
         finishErr(new Error(
-          `terraform ${args[0]} timed out after ${Math.floor(timeoutMs / 60_000)} minutes. ` +
+          `terraform ${command} timed out after ${Math.floor(timeoutMs / 60_000)} minutes. ` +
           `Please retry Deploy. If it repeats, check proxy/network and ensure no other deploy is running.`
         ))
       }, timeoutMs)
@@ -347,7 +359,7 @@ function runWindowsTerraform(args: string[], options?: { timeoutMs?: number }): 
     proc.stderr.on('data', (d) => { err += d; sendLog(d.toString()) })
     proc.on('close', (code) => {
       if (code === 0) finishOk(out)
-      else finishErr(new Error(err || `terraform ${args[0]} exited with code ${code}`))
+      else finishErr(new Error(err || `terraform ${command} exited with code ${code}`))
     })
     proc.on('error', (e) => finishErr(e instanceof Error ? e : new Error(String(e))))
   })
