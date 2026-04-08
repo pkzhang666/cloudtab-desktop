@@ -53,7 +53,7 @@ export default function Onboarding() {
 
   const prereqsOk = prereqs && Object.values(prereqs).every(Boolean)
   const missingWindowsInstalls = prereqs
-    ? (['wsl', 'gcloud', 'terraform', 'docker'] as const).filter((key) => isWindows && !prereqs[key])
+    ? (['wsl', 'gcloud'] as const).filter((key) => isWindows && !prereqs[key])
     : []
 
   async function handleInstallMissingWindowsPrereqs() {
@@ -149,9 +149,7 @@ export default function Onboarding() {
                   gcloud: 'Google Cloud SDK (gcloud)',
                   'gcloud-auth': 'gcloud auth login',
                   adc: 'gcloud auth application-default login',
-                  terraform: 'Terraform ≥ 1.5',
-                  docker: 'Docker',
-                  ...(isWindows ? { wsl: 'WSL 2 (Windows Subsystem for Linux)' } : {}),
+                  ...(isWindows ? { wsl: 'WSL 2 + build-essential + terraform' } : {}),
                 }).map(([k, label]) => (
                   <div key={k} className="flex items-center gap-3 bg-gray-900 rounded-lg px-4 py-3">
                     {prereqs[k]

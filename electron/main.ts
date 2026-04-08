@@ -250,20 +250,18 @@ function requireConfig(env: Record<string, string>, keys: string[]): void {
 
 async function getPrerequisiteStatus(): Promise<Record<string, boolean>> {
   const results: Record<string, boolean> = {}
-  for (const tool of ['gcloud', 'terraform', 'docker']) {
-    results[tool] = commandExists(tool)
-  }
-  // On Windows, wsl.exe + distro are necessary. Also auto-install build-essential on first check after distro is ready.
+  // Windows: only gcloud and wsl + distro
+  results['gcloud'] = commandExists('gcloud')
   if (isWindows) {
     results['wsl'] = commandExists('wsl') && wslHasDistro()
     if (results['wsl']) {
-      // Try to ensure build-essential is installed — this is fire-and-forget auto-install
-      results['wsl'] = await ensureWslBuildEssential()
+      // Auto-install build-essential and tools (terraform, docker) in WSL
+      await ensureWslBuildEssential()
+      results['wsl'] = await ensureWslToolsInstalled()
     }
   }
 
   results['gcloud-auth'] = await hasActiveGcloudLogin()
-
   results['adc'] = await hasApplicationDefaultCredentials()
 
   return results
@@ -325,23 +323,22 @@ async function hasApplicationDefaultCredentials(): Promise<boolean> {
   }
 }
 
-// Get a clean environment for WSL to avoid Windows PATH translation issues.
-// Use minimal vars to avoid "Failed to translate" warnings on paths with spaces.
+// Get a minimal environment for WSL with no Windows PATH/proxy/env vars.
+// This prevents 'Failed to translate' warnings and path-resolution issues.
 function getWslEnv(): NodeJS.ProcessEnv {
   return {
-    WSLENV: '',  // Don't translate Windows env vars to WSL
-    CORE_DIR: toWslPath(CORE_DIR),
-    HOME: '/root',  // WSL default home
+    // Explicitly don't pass any Windows env vars
+    PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    HOME: '/root',
+    SHELL: '/bin/bash',
   }
 }
 
 // Check if build-essential (make, gcc, etc.) is installed in WSL, and auto-install if not.
-// Runs as root via `--user root` to avoid sudo password prompts on first-run setup.
 async function ensureWslBuildEssential(): Promise<boolean> {
   if (!isWindows || !wslHasDistro()) return false
 
   try {
-    // Test if make exists
     const result = require('child_process').spawnSync(
       'wsl',
       ['-d', 'Ubuntu-24.04', '--user', 'root', '--', 'which', 'make'],
@@ -349,20 +346,68 @@ async function ensureWslBuildEssential(): Promise<boolean> {
     )
     if (result.status === 0) return true  // make already installed
 
-    // Not installed, install build-essential
-    mainWindow?.webContents.send('log', 'Installing build-essential in Ubuntu (this may take a minute)...\n')
+    mainWindow?.webContents.send('log', 'Installing build-essential in Ubuntu...\\n')
     const install = require('child_process').spawnSync(
       'wsl',
       ['-d', 'Ubuntu-24.04', '--user', 'root', '--', 'bash', '-c',
        'apt-get update && apt-get install -y build-essential'],
-      { encoding: 'utf8', stdio: 'pipe', timeout: 120_000 },  // 2 min timeout for apt
+      { encoding: 'utf8', stdio: 'pipe', timeout: 120_000 },
     )
     if (install.status === 0) {
-      mainWindow?.webContents.send('log', 'build-essential installed successfully.\n')
+      mainWindow?.webContents.send('log', 'build-essential installed successfully.\\n')
       return true
     }
-    mainWindow?.webContents.send('log', `Failed to auto-install build-essential: ${install.stderr}\n`)
+    mainWindow?.webContents.send('log', `Failed to auto-install build-essential: ${install.stderr}\\n`)
     return false
+  } catch (e) {
+    return false
+  }
+}
+
+// Check if terraform and docker are installed in WSL, and auto-install if not.
+async function ensureWslToolsInstalled(): Promise<boolean> {
+  if (!isWindows || !wslHasDistro()) return false
+
+  try {
+    // Check if terraform exists
+    const tfResult = require('child_process').spawnSync(
+      'wsl',
+      ['-d', 'Ubuntu-24.04', '--user', 'root', '--', 'which', 'terraform'],
+      { encoding: 'utf8', stdio: 'pipe', timeout: 10_000 },
+    )
+    const hasterraform = tfResult.status === 0
+
+    // Check if docker exists
+    const dockerResult = require('child_process').spawnSync(
+      'wsl',
+      ['-d', 'Ubuntu-24.04', '--user', 'root', '--', 'which', 'docker'],
+      { encoding: 'utf8', stdio: 'pipe', timeout: 10_000 },
+    )
+    const hasDocker = dockerResult.status === 0
+
+    if (hasterraform && hasDocker) return true  // Both already installed
+
+    // Install missing tools
+    const toInstall = []
+    if (!hasterraform) toInstall.push('terraform')
+    if (!hasDocker) toInstall.push('docker.io')
+
+    if (toInstall.length > 0) {
+      mainWindow?.webContents.send('log', `Installing ${toInstall.join(', ')} in Ubuntu (this may take a minute)...\n`)
+      const install = require('child_process').spawnSync(
+        'wsl',
+        ['-d', 'Ubuntu-24.04', '--user', 'root', '--', 'bash', '-c',
+         `apt-get update && apt-get install -y ${toInstall.join(' ')}`],
+        { encoding: 'utf8', stdio: 'pipe', timeout: 180_000 },  // 3 min timeout
+      )
+      if (install.status === 0) {
+        mainWindow?.webContents.send('log', `Installed ${toInstall.join(', ')} successfully.\n`)
+        return true
+      }
+      mainWindow?.webContents.send('log', `Failed to auto-install tools: ${install.stderr}\n`)
+      return false
+    }
+    return true
   } catch (e) {
     return false
   }
