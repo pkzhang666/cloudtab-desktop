@@ -123,12 +123,15 @@ function resolveWindowsCommandPath(cmd: string): string | null {
   return preferred || null
 }
 
-// Run a gcloud command safely — args passed as array, never interpolated into a string
+// Run a gcloud command safely — args passed as array, never interpolated into a string.
+// On Windows, gcloud is a .cmd file and cannot be spawned directly — use cmd.exe /c.
 function gcloud(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const freshEnv = isWindows ? freshWindowsEnv() : undefined
-    const gcloudBin = isWindows ? (resolveWindowsCommandPath('gcloud') || 'gcloud') : 'gcloud'
-    execFile(gcloudBin, args, { encoding: 'utf8', ...(freshEnv && { env: freshEnv }) },
+    const [cmd, cmdArgs] = isWindows
+      ? ['cmd.exe', ['/c', 'gcloud', ...args]]
+      : ['gcloud', args]
+    execFile(cmd, cmdArgs, { encoding: 'utf8', ...(freshEnv && { env: freshEnv }) },
       (err, stdout: string, stderr: string) => {
         if (err) reject(new Error(stderr || err.message))
         else resolve(stdout.trim())
@@ -264,11 +267,14 @@ function quotePowerShell(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
 
+// On Windows, CLI tools like gcloud are .cmd files — spawn via cmd.exe /c.
 function runLoggedProcess(command: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const env = isWindows ? freshWindowsEnv() : process.env
-    const executable = isWindows ? (resolveWindowsCommandPath(command) || command) : command
-    const proc = spawn(executable, args, { env, windowsHide: false })
+    const [cmd, cmdArgs] = isWindows
+      ? ['cmd.exe', ['/c', command, ...args]]
+      : [command, args]
+    const proc = spawn(cmd, cmdArgs, { env, windowsHide: false })
     let out = '', err = ''
     proc.stdout.on('data', (d) => { out += d; mainWindow?.webContents.send('log', d.toString()) })
     proc.stderr.on('data', (d) => { err += d; mainWindow?.webContents.send('log', d.toString()) })
@@ -409,15 +415,18 @@ ipcMain.handle('open-tunnel', async () => {
 
   return new Promise<{ ok: boolean; port: number }>((resolve, reject) => {
     const envForTunnel = isWindows ? freshWindowsEnv() : process.env
-    const gcloudBin = isWindows ? (resolveWindowsCommandPath('gcloud') || 'gcloud') : 'gcloud'
-    const proc = spawn(gcloudBin, [
+    const tunnelGcloudArgs = [
       'compute', 'ssh', env.VM_NAME,
       `--zone=${env.ZONE}`, `--project=${env.PROJECT_ID}`,
       '--tunnel-through-iap',
       '--', '-L', '8080:localhost:8080', '-N',
       '-o', 'ExitOnForwardFailure=yes',
       '-o', 'ServerAliveInterval=30',
-    ], { env: envForTunnel, windowsHide: false })
+    ]
+    const [tunnelCmd, tunnelArgs] = isWindows
+      ? ['cmd.exe' as string, ['/c', 'gcloud', ...tunnelGcloudArgs]]
+      : ['gcloud' as string, tunnelGcloudArgs]
+    const proc = spawn(tunnelCmd, tunnelArgs, { env: envForTunnel, windowsHide: false })
 
     proc.on('error', (err) => reject(err))
 
