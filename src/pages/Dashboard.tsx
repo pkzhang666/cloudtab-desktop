@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Play, Square, Wifi, WifiOff, Settings, RefreshCw,
-  Terminal, ChevronDown, ChevronUp, Loader2, Globe, AlertCircle,
+  Terminal, ChevronDown, ChevronUp, Loader2, Globe, AlertCircle, ArrowLeft,
 } from 'lucide-react'
 import { useStore } from '../store'
 
@@ -123,6 +123,12 @@ export default function Dashboard() {
       {/* Top bar */}
       <header className="flex items-center justify-between px-5 py-3 border-b border-gray-800">
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => navigate('/onboarding')}
+            title="Back to setup"
+            className="p-1.5 rounded-md hover:bg-gray-800 transition-colors">
+            <ArrowLeft size={16} className="text-gray-400" />
+          </button>
           <h1 className="font-bold text-lg tracking-tight">CloudTab</h1>
           <span className={`text-xs font-mono ${STATUS_COLOR[vmStatus]}`}>
             {STATUS_LABEL[vmStatus]}

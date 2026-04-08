@@ -89,13 +89,28 @@ function commandExists(cmd: string): boolean {
   } catch { return false }
 }
 
+// Returns the path to the true 64-bit System32 directory.
+// On a 64-bit OS running a 32-bit process the Windows File System Redirector silently
+// maps "System32" → "SysWOW64", which does NOT contain wsl.exe. The "Sysnative"
+// virtual folder bypasses the redirector and points at the real 64-bit System32.
+// Reference: https://learn.microsoft.com/en-us/windows/wsl/basic-commands
+function winSys32(): string {
+  const root = process.env.SystemRoot ?? 'C:\\Windows'
+  const is32bitOnWin64 = process.arch !== 'x64' && require('os').arch() === 'x64'
+  return join(root, is32bitOnWin64 ? 'Sysnative' : 'System32')
+}
+
+// Absolute path to wsl.exe — avoids PATH lookup entirely so spawn never fails
+// with ENOENT regardless of what PATH the packaged Electron process inherited.
+function wslExe(): string { return join(winSys32(), 'wsl.exe') }
+
 // wsl.exe may exist but have zero distributions installed.
 // Run `wsl --list --quiet` and check for at least one line of output.
 function wslHasDistro(): boolean {
   try {
     const result = require('child_process').spawnSync(
-      'wsl.exe', ['--list', '--quiet'],
-      { encoding: 'utf16le', stdio: 'pipe', env: freshWindowsEnv() },  // wsl outputs UTF-16 LE
+      wslExe(), ['--list', '--quiet'],
+      { encoding: 'utf16le', stdio: 'pipe' },  // wsl outputs UTF-16 LE
     )
     if (result.status !== 0) return false
     const lines = String(result.stdout || '')
@@ -108,11 +123,19 @@ function wslHasDistro(): boolean {
 
 // Read the current merged PATH from the Windows registry so newly installed tools
 // are visible even though the Electron process was started before they were installed.
+// Uses an absolute path for powershell.exe (via %SystemRoot%) so this works regardless
+// of what PATH the packaged Electron app inherited.
+// Uses ExpandEnvironmentVariables so tokens like %SystemRoot%\system32 are resolved
+// to real paths before being stored — Node.js spawn does not expand them automatically.
 function freshWindowsEnv(): NodeJS.ProcessEnv {
+  const psExe = join(
+    process.env.SystemRoot ?? 'C:\\Windows',
+    'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe',
+  )
   const ps = require('child_process').spawnSync(
-    'powershell.exe',
+    psExe,
     ['-NoProfile', '-Command',
-     "[System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User')"],
+     "[System.Environment]::ExpandEnvironmentVariables([System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User'))"],
     { encoding: 'utf8', stdio: 'pipe' },
   )
   const freshPath: string = ps.stdout?.trim() || process.env.PATH || ''
@@ -121,7 +144,7 @@ function freshWindowsEnv(): NodeJS.ProcessEnv {
 
 function resolveWindowsCommandPath(cmd: string): string | null {
   const result = require('child_process').spawnSync(
-    'where.exe',
+    join(winSys32(), 'where.exe'),
     [cmd],
     { encoding: 'utf8', stdio: 'pipe', env: freshWindowsEnv() },
   )
@@ -145,8 +168,9 @@ function resolveWindowsCommandPath(cmd: string): string | null {
 function gcloud(args: string[], timeoutMs?: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const freshEnv = isWindows ? freshWindowsEnv() : undefined
+    const cmdExe = process.env.ComSpec ?? join(winSys32(), 'cmd.exe')
     const [cmd, cmdArgs] = isWindows
-      ? ['cmd.exe', ['/c', 'gcloud', ...args]]
+      ? [cmdExe, ['/c', 'gcloud', ...args]]
       : ['gcloud', args]
     execFile(cmd, cmdArgs, {
       encoding: 'utf8',
@@ -169,7 +193,7 @@ function runScript(script: string, args: string[] = []): Promise<string> {
   }
   const scriptPath = join(CORE_DIR, 'scripts', script)
   const [cmd, cmdArgs] = isWindows
-    ? ['wsl', ['--user', 'root', '--', 'env', '-i', ...buildWslLinuxEnv(), 'bash', toWslPath(scriptPath), ...args]]
+    ? [wslExe(), ['--user', 'root', '--', 'env', '-i', ...buildWslLinuxEnv(), 'bash', toWslPath(scriptPath), ...args]]
     : ['bash', [scriptPath, ...args]]
 
   return new Promise((resolve, reject) => {
@@ -201,7 +225,7 @@ function runMake(target: string): Promise<string> {
   }
   const makefileDir = CORE_DIR
   const [cmd, cmdArgs] = isWindows
-    ? ['wsl', ['--user', 'root', '--', 'env', '-i', ...buildWslLinuxEnv(), 'make', '-C', toWslPath(makefileDir), target]]
+    ? [wslExe(), ['--user', 'root', '--', 'env', '-i', ...buildWslLinuxEnv(), 'make', '-C', toWslPath(makefileDir), target]]
     : ['make', ['-C', makefileDir, target]]
 
   return new Promise((resolve, reject) => {
@@ -353,7 +377,7 @@ async function ensureWslEnvironment(): Promise<boolean> {
 
   // Quick check: all tools already present?
   const quickCheck = require('child_process').spawnSync(
-    'wsl',
+    wslExe(),
     ['--user', 'root', '--', 'bash', '-c',
      'command -v make && command -v terraform && command -v docker && command -v gcloud'],
     { encoding: 'utf8', stdio: 'pipe', timeout: 15_000, env: wslEnv },
@@ -391,7 +415,7 @@ async function ensureWslEnvironment(): Promise<boolean> {
   ].join('\n')
 
   const install = require('child_process').spawnSync(
-    'wsl',
+    wslExe(),
     ['--user', 'root', '--', 'bash', '-c', installScript],
     { encoding: 'utf8', stdio: 'pipe', timeout: 600_000, env: wslEnv },  // 10 min max
   )
@@ -415,7 +439,7 @@ function runLoggedProcess(command: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const env = isWindows ? freshWindowsEnv() : process.env
     const [cmd, cmdArgs] = isWindows
-      ? ['cmd.exe', ['/c', command, ...args]]
+      ? [process.env.ComSpec ?? join(winSys32(), 'cmd.exe'), ['/c', command, ...args]]
       : [command, args]
     const proc = spawn(cmd, cmdArgs, { env, windowsHide: false, stdio: ['ignore', 'pipe', 'pipe'] })
     let out = '', err = ''
@@ -433,7 +457,11 @@ function runElevatedWindowsProcess(command: string, args: string[]): Promise<voi
   const script = `$p = Start-Process -FilePath ${quotePowerShell(command)} -Verb RunAs -Wait -PassThru -ArgumentList @(${argList}); exit $p.ExitCode`
 
   return new Promise((resolve, reject) => {
-    const proc = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    const psExe = join(
+      process.env.SystemRoot ?? 'C:\\Windows',
+      'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe',
+    )
+    const proc = spawn(psExe, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
       env: process.env,
       windowsHide: false,
     })
@@ -499,8 +527,9 @@ async function runGcloudAuth(target: GcloudAuthTarget): Promise<void> {
   // OAuth flow doesn't block the IPC call. The IPC returns immediately;
   // the user completes login in the browser then clicks Re-check.
   const env = isWindows ? freshWindowsEnv() : process.env
+  const cmdExe = process.env.ComSpec ?? join(winSys32(), 'cmd.exe')
   const [cmd, cmdArgs] = isWindows
-    ? ['cmd.exe', ['/c', 'gcloud', ...args]]
+    ? [cmdExe, ['/c', 'gcloud', ...args]]
     : ['gcloud', args]
   const child = spawn(cmd, cmdArgs, { env, windowsHide: false, stdio: 'ignore', detached: true })
   child.unref()
@@ -570,7 +599,7 @@ ipcMain.handle('open-tunnel', async () => {
       '-o', 'ServerAliveInterval=30',
     ]
     const [tunnelCmd, tunnelArgs] = isWindows
-      ? ['cmd.exe' as string, ['/c', 'gcloud', ...tunnelGcloudArgs]]
+      ? [(process.env.ComSpec ?? join(winSys32(), 'cmd.exe')) as string, ['/c', 'gcloud', ...tunnelGcloudArgs]]
       : ['gcloud' as string, tunnelGcloudArgs]
     const proc = spawn(tunnelCmd, tunnelArgs, { env: envForTunnel, windowsHide: false })
 
