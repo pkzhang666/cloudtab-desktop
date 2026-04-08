@@ -89,6 +89,23 @@ function commandExists(cmd: string): boolean {
   } catch { return false }
 }
 
+// wsl.exe may exist but have zero distributions installed.
+// Run `wsl --list --quiet` and check for at least one line of output.
+function wslHasDistro(): boolean {
+  try {
+    const result = require('child_process').spawnSync(
+      'wsl.exe', ['--list', '--quiet'],
+      { encoding: 'utf16le', stdio: 'pipe' },  // wsl outputs UTF-16 LE
+    )
+    if (result.status !== 0) return false
+    const lines = String(result.stdout || '')
+      .split(/\r?\n/)
+      .map((l: string) => l.trim())
+      .filter(Boolean)
+    return lines.length > 0
+  } catch { return false }
+}
+
 // Read the current merged PATH from the Windows registry so newly installed tools
 // are visible even though the Electron process was started before they were installed.
 function freshWindowsEnv(): NodeJS.ProcessEnv {
@@ -144,6 +161,12 @@ function gcloud(args: string[], timeoutMs?: number): Promise<string> {
 
 // Run a bash script — on Windows, delegate to WSL
 function runScript(script: string, args: string[] = []): Promise<string> {
+  if (isWindows && !wslHasDistro()) {
+    return Promise.reject(new Error(
+      'WSL has no Linux distribution installed. Open a terminal and run: wsl --install -d Ubuntu\n' +
+      'Then restart, launch Ubuntu once to finish setup, and try again.'
+    ))
+  }
   const scriptPath = join(CORE_DIR, 'scripts', script)
   const [cmd, cmdArgs] = isWindows
     ? ['wsl', ['bash', toWslPath(scriptPath), ...args]]
@@ -163,6 +186,12 @@ function runScript(script: string, args: string[] = []): Promise<string> {
 
 // Run a make target — on Windows, delegate to WSL
 function runMake(target: string): Promise<string> {
+  if (isWindows && !wslHasDistro()) {
+    return Promise.reject(new Error(
+      'WSL has no Linux distribution installed. Open a terminal and run: wsl --install -d Ubuntu\n' +
+      'Then restart, launch Ubuntu once to finish setup, and try again.'
+    ))
+  }
   const makefileDir = CORE_DIR
   const [cmd, cmdArgs] = isWindows
     ? ['wsl', ['make', '-C', toWslPath(makefileDir), target]]
@@ -208,7 +237,8 @@ async function getPrerequisiteStatus(): Promise<Record<string, boolean>> {
   for (const tool of ['gcloud', 'terraform', 'docker']) {
     results[tool] = commandExists(tool)
   }
-  if (isWindows) results['wsl'] = commandExists('wsl')
+  // On Windows, wsl.exe existing is not enough — we need a distro installed.
+  if (isWindows) results['wsl'] = commandExists('wsl') && wslHasDistro()
 
   results['gcloud-auth'] = await hasActiveGcloudLogin()
 
@@ -323,8 +353,10 @@ async function installWindowsPrerequisite(target: WindowsInstallTarget): Promise
 
   switch (target) {
     case 'wsl':
-      mainWindow?.webContents.send('log', 'Installing WSL 2...\n')
-      await runElevatedWindowsProcess('wsl', ['--install'])
+      mainWindow?.webContents.send('log', 'Installing WSL 2 and Ubuntu...\n')
+      // --install defaults to Ubuntu. The user must restart Windows and launch
+      // Ubuntu once from the Start menu to finish the distro initialisation.
+      await runElevatedWindowsProcess('wsl', ['--install', '-d', 'Ubuntu'])
       return { restartRequired: true }
     case 'gcloud':
       mainWindow?.webContents.send('log', 'Installing Google Cloud SDK with winget...\n')

@@ -165,11 +165,14 @@ export default function Onboarding() {
                 ))}
 
                 {!prereqsOk && (
-                  <div className="text-sm text-red-400 pt-1 space-y-1">
-                    <p>Install missing tools, then click Re-check.</p>
+                  <div className="text-sm pt-1 space-y-1">
+                    <p className="text-red-400">Install missing tools, then click Re-check.</p>
                     {isWindows && !prereqs['wsl'] && (
                       <p className="text-gray-400">
-                        CloudTab can launch the Windows installers for you. WSL may still require a restart.
+                        WSL is not ready. Click <strong className="text-white">Install missing on Windows</strong> below,
+                        then restart when prompted.{' '}
+                        After restart, open <strong className="text-white">Ubuntu</strong> from the Start menu once to
+                        finish distro setup, then click Re-check.
                       </p>
                     )}
                   </div>
