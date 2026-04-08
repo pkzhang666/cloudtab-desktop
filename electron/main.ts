@@ -254,7 +254,11 @@ function getAdcCredentialPath(): string {
 async function hasApplicationDefaultCredentials(): Promise<boolean> {
   if (!commandExists('gcloud')) return false
 
-  // Prefer real token validation to avoid false positives from stale credential files.
+  // Fast path: credential file presence is the reliable signal.
+  // Avoids hanging on print-access-token while another gcloud auth process is in flight.
+  if (existsSync(getAdcCredentialPath())) return true
+
+  // Fallback: validate via token (catches revoked / corrupt credential files).
   try {
     await gcloud(['auth', 'application-default', 'print-access-token'])
     return true
@@ -268,16 +272,17 @@ function quotePowerShell(value: string): string {
 }
 
 // On Windows, CLI tools like gcloud are .cmd files — spawn via cmd.exe /c.
+// stdin is closed ('ignore') so interactive gcloud auth flows don't block waiting for input.
 function runLoggedProcess(command: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const env = isWindows ? freshWindowsEnv() : process.env
     const [cmd, cmdArgs] = isWindows
       ? ['cmd.exe', ['/c', command, ...args]]
       : [command, args]
-    const proc = spawn(cmd, cmdArgs, { env, windowsHide: false })
+    const proc = spawn(cmd, cmdArgs, { env, windowsHide: false, stdio: ['ignore', 'pipe', 'pipe'] })
     let out = '', err = ''
-    proc.stdout.on('data', (d) => { out += d; mainWindow?.webContents.send('log', d.toString()) })
-    proc.stderr.on('data', (d) => { err += d; mainWindow?.webContents.send('log', d.toString()) })
+    proc.stdout!.on('data', (d) => { out += d; mainWindow?.webContents.send('log', d.toString()) })
+    proc.stderr!.on('data', (d) => { err += d; mainWindow?.webContents.send('log', d.toString()) })
     proc.on('close', (code) => code === 0 ? resolve(out.trim()) : reject(new Error(err || `${command} exited with code ${code}`)))
     proc.on('error', reject)
   })
