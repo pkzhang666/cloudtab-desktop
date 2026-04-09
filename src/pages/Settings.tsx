@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ChevronLeft, AlertCircle, Save, Trash2, Loader2, CheckCircle2 } from 'lucide-react'
+import { ChevronLeft, AlertCircle, Save, Trash2, Loader2, CheckCircle2, KeyRound } from 'lucide-react'
 
 const MACHINE_TYPES = [
   { value: 'e2-medium',     spec: '1 vCPU / 4 GB',  cost: '~$9/mo' },
@@ -28,6 +28,8 @@ export default function Settings() {
   const [loaded,    setLoaded]    = useState(false)
   const [saving,    setSaving]    = useState(false)
   const [destroying,setDestroying]= useState(false)
+  const [authenticating, setAuthenticating] = useState('')
+  const [authDone,   setAuthDone]   = useState('')
   const [error,     setError]     = useState('')
   const [saved,     setSaved]     = useState(false)
 
@@ -62,6 +64,19 @@ export default function Settings() {
       setError(e?.message ?? 'Failed to save config.')
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function handleAuth(target: 'gcloud-auth' | 'adc') {
+    setAuthenticating(target); setError('')
+    try {
+      await window.api.runGcloudAuth(target)
+      setAuthDone(target)
+      setTimeout(() => setAuthDone(''), 3000)
+    } catch (e: any) {
+      setError(e?.message ?? 'Authentication failed.')
+    } finally {
+      setAuthenticating('')
     }
   }
 
@@ -185,6 +200,39 @@ export default function Settings() {
             ? <><CheckCircle2 size={16} className="text-green-300" />Saved!</>
             : <><Save size={16} />Save changes</>}
         </button>
+
+        {/* Authentication */}
+        <section className="space-y-3 pt-2">
+          <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Authentication</h2>
+          <div className="bg-gray-900 rounded-xl p-4 space-y-3">
+            <p className="text-sm text-gray-400">
+              Re-run gcloud login if your credentials have expired. Both steps run on this Windows machine.
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => handleAuth('gcloud-auth')}
+                disabled={!!authenticating}
+                className="py-2 bg-gray-800 hover:bg-gray-700 rounded-xl text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
+                {authenticating === 'gcloud-auth'
+                  ? <><Loader2 size={14} className="animate-spin" />Opening…</>
+                  : authDone === 'gcloud-auth'
+                  ? <><CheckCircle2 size={14} className="text-green-400" />Opened!</>
+                  : <><KeyRound size={14} />gcloud auth login</>}
+              </button>
+              <button
+                onClick={() => handleAuth('adc')}
+                disabled={!!authenticating}
+                className="py-2 bg-gray-800 hover:bg-gray-700 rounded-xl text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
+                {authenticating === 'adc'
+                  ? <><Loader2 size={14} className="animate-spin" />Opening…</>
+                  : authDone === 'adc'
+                  ? <><CheckCircle2 size={14} className="text-green-400" />Opened!</>
+                  : <><KeyRound size={14} />ADC login</>}
+              </button>
+            </div>
+            <p className="text-xs text-gray-600">Both buttons open your browser — complete sign-in there, then return to the app.</p>
+          </div>
+        </section>
 
         {/* Danger zone */}
         <section className="space-y-3 pt-2">
